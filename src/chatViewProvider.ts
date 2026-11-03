@@ -25,6 +25,7 @@ import {
   selectionAttachment,
   viewOf,
 } from "./context";
+import { ChangesController, ChangesMessage } from "./changes";
 import { SseStream } from "./sseStream";
 import { currentFolder, neoSlug, normalizePath, projectForFolder, samePath } from "./workspace";
 
@@ -131,6 +132,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private lastEditor: vscode.TextEditor | undefined;
   private editorTimer: NodeJS.Timeout | undefined;
   private disposables: vscode.Disposable[] = [];
+  // What NEO produced (src/changes.ts): the changed files and their diffs.
+  private changes = new ChangesController((m) => this.post(m));
 
   constructor(private readonly extensionUri: vscode.Uri) {
     this.client = new NeoClient(serverUrl());
@@ -161,6 +164,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.stopProject();
     if (this.editorTimer) clearTimeout(this.editorTimer);
     this.disposables.forEach((d) => d.dispose());
+    this.changes.dispose();
   }
 
   // --- workspace context ------------------------------------------------------------------
@@ -620,6 +624,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   // --- webview actions --------------------------------------------------------------------
 
   private async onMessage(m: Inbound): Promise<void> {
+    if (m.type.startsWith("changes.")) {
+      await this.changes.onMessage(m as unknown as ChangesMessage);
+      return;
+    }
     switch (m.type) {
       case "ready":
         this.postState();
@@ -881,6 +889,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private postState(): void {
     this.state.attachments = this.attachments.map(viewOf);
     this.state.suggestion = this.state.mode === "project" ? this.suggestion() : null;
+    this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
     this.post({ type: "state", state: this.state });
   }
 
@@ -898,6 +907,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:;">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="${media("chat.css")}">
+<link rel="stylesheet" href="${media("changes.css")}">
 <title>NEO</title>
 </head>
 <body>
@@ -956,6 +966,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
   <main id="transcript" class="transcript" aria-live="polite"></main>
 
+  <section id="changes" class="changes hidden" aria-label="Files NEO changed"></section>
+
   <section id="gate" class="card gate hidden">
     <div class="gate-head">
       <span class="gate-badge">Gate</span>
@@ -966,6 +978,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       <summary id="gate-doc-summary">document</summary>
       <div id="gate-doc-body" class="md"></div>
     </details>
+    <div id="gate-changes" class="gate-changes hidden"></div>
     <ul id="gate-checks" class="checks"></ul>
     <div id="gate-refusal" class="refusal hidden"></div>
     <textarea id="gate-text" rows="3" placeholder="What should change? (required for Request Changes)"></textarea>
@@ -999,6 +1012,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   <div id="toasts" class="toasts"></div>
 </div>
 <script nonce="${nonce}" src="${media("chat.js")}"></script>
+<script nonce="${nonce}" src="${media("changes.js")}"></script>
 </body>
 </html>`;
   }

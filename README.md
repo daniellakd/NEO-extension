@@ -81,6 +81,24 @@ expands what was sent.
 Limits: 5 items per message, 40,000 characters per item and 80,000 in total. Binary files cannot
 be attached.
 
+## Reviewing what NEO changed
+
+From Execute on, a **Changes** strip above the message box lists the files NEO's work changed,
+with additions and deletions (`main.py +24 −3`). Click it to unfold the list; click a file to open
+VS Code's diff editor. Both sides of the diff are read-only.
+
+- **While NEO works** (Execute, Review): the work branch's worktree, uncommitted edits included,
+  against the point it branched from `main`. Files not yet added to git are marked **U**.
+- **At the Review gate:** the same list is inside the gate card, above the checks, so you can open
+  each diff before **Approve** or **Request Changes**.
+- **After Done:** the merge commit NEO left on `main`, against `main` before the merge.
+
+In the chat, the file name on an edit, write or read row opens that file.
+
+The extension reads git itself (NEO's own `/diff` compares the project root, which stays on `main`
+while the work happens in `.worktrees/`). It only runs reading commands and never writes to the
+project or the worktree. `git` must be on `PATH`.
+
 ## Existing project or new project
 
 **Existing project:** if the open folder is already a NEO project, the sidebar selects it
