@@ -1,0 +1,140 @@
+{
+  "name": "neo-vscode",
+  "displayName": "NEO",
+  "description": "Chat with the local NEO orchestrator from VS Code. A thin client: the pipeline, gates and checks stay in NEO. Powered by CodeValue.",
+  "version": "0.1.0",
+  "publisher": "neoag",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "neo",
+          "title": "NEO",
+          "icon": "media/neo.svg"
+        }
+      ]
+    },
+    "views": {
+      "neo": [
+        {
+          "type": "webview",
+          "id": "neo.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "neo.connect",
+        "title": "Connect",
+        "category": "NEO",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "neo.refresh",
+        "title": "Refresh",
+        "category": "NEO",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "neo.newProject",
+        "title": "New Project",
+        "category": "NEO",
+        "icon": "$(add)"
+      },
+      {
+        "command": "neo.openInBrowser",
+        "title": "Open in Browser",
+        "category": "NEO",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "neo.switchProject",
+        "title": "Projects",
+        "category": "NEO",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "neo.addContext",
+        "title": "Add Context to Message…",
+        "category": "NEO"
+      },
+      {
+        "command": "neo.addCurrentFile",
+        "title": "Add Current File to Message",
+        "category": "NEO"
+      },
+      {
+        "command": "neo.addSelection",
+        "title": "Add Selection to Message",
+        "category": "NEO"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "neo.addSelection",
+          "when": "editorHasSelection && resourceScheme == file",
+          "group": "neo@1"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "neo.newProject",
+          "when": "view == neo.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "neo.openInBrowser",
+          "when": "view == neo.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "neo.switchProject",
+          "when": "view == neo.chat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "neo.refresh",
+          "when": "view == neo.chat",
+          "group": "navigation@4"
+        },
+        {
+          "command": "neo.connect",
+          "when": "view == neo.chat",
+          "group": "overflow"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "NEO",
+      "properties": {
+        "neo.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8720",
+          "description": "Base URL of the running NEO-AG orchestrator. The extension never starts it."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "~1.90.0",
+    "typescript": "~5.6.3"
+  }
+}
