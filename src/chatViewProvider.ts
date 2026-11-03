@@ -33,6 +33,8 @@ import {
   buildLive,
   liveNotice,
   noticeOf,
+  stopExplains,
+  touchesPlan,
 } from "./progress";
 import { ChangesController, ChangesMessage } from "./changes";
 import { SseStream } from "./sseStream";
@@ -89,6 +91,8 @@ interface ViewState {
   // Live progress. Everything below is derived from what NEO already reports; see src/progress.ts.
   stopping: boolean;
   stoppedAt?: number;
+  /** The user's Stop ended the last turn and nothing has started since (see buildLive). */
+  userStopped: boolean;
   streamRetryAt?: number;
   catchingUp: boolean;
   live?: LiveView;
@@ -457,6 +461,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       if (ev.kind === "gate") {
         this.plan.noteGate(ev.phase as string | undefined, ev.artifact_path as string | undefined, ev.artifact, detail.plan_progress?.total);
       }
+      // A re-plan while this window was closed makes the remembered progress stale.
+      if (ev.kind === "gate" || ev.kind === "phase") this.plan.notePhase(ev.phase as string | undefined, ev.seq);
     }
     this.applyDetail(detail);
 
@@ -519,7 +525,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.stopRequestedAt = 0;
     this.state.stopping = false;
     this.state.stoppedAt = undefined;
+    this.state.userStopped = false;
     this.state.catchingUp = false;
+    // This stream is closed: "up" belongs to the project just left, not to the next one.
+    this.state.stream = "off";
     this.state.streamRetryAt = undefined;
   }
 
@@ -583,11 +592,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     // What NEO is doing right now, from the events it already sends. Reading only: this never
     // writes a phase, a gate or a count.
     this.action.note(ev, s.phase);
+    // A step was probably just ticked: re-read now rather than at the next 10-second tick.
+    if (touchesPlan(ev)) setTimeout(() => void this.resync(), 300);
     switch (ev.kind) {
       case "phase": {
         const phase = String(ev.phase ?? "");
         if (!phase) break;
         s.phase = phase;
+        s.userStopped = false;
+        this.plan.notePhase(phase, ev.seq);
         this.notice = null;                          // a new phase answers whatever the last one said
         if (!phase.endsWith("-gate")) {
           s.atGate = false;
@@ -601,6 +614,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         s.atGate = true;
         this.notice = null;                          // a gate is the new state; the old one is history
         if (typeof ev.phase === "string") s.phase = ev.phase;
+        this.plan.notePhase(ev.phase as string | undefined, ev.seq);
         this.plan.noteGate(ev.phase as string | undefined, ev.artifact_path as string | undefined, ev.artifact, s.planProgress?.total);
         s.gate = {
           phase: typeof ev.phase === "string" ? ev.phase : s.phase,
@@ -617,6 +631,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       }
       case "status":
         if (typeof ev.busy === "boolean") s.busy = ev.busy;
+        if (ev.busy === true) s.userStopped = false;   // a new turn: whatever ends it is not the Stop
         break;
       case "idle":
         s.busy = false;
@@ -626,6 +641,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         s.pendingRequest = null;
         this.notice = null;                          // the user answered: a stall notice is over
         s.stoppedAt = undefined;
+        s.userStopped = false;
+        // NEO clears its stall when the user writes; this copy follows at the next re-read.
+        s.needsAttention = false;
+        s.attentionReason = null;
         break;
       case "question":
         s.awaiting = true;
@@ -635,7 +654,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         // Only the notices that describe a state the user is still in reach the live line; every
         // notice is drawn in the transcript either way, so nothing is said twice.
         const held = noticeOf(ev);
-        if (held) this.notice = held;
+        // The stall NEO reports for the turn the user stopped is the Stop, said as such by buildLive.
+        if (held && !(s.userStopped && stopExplains(ev.stalled))) this.notice = held;
         break;
       }
     }
@@ -685,6 +705,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     // An open gate carries its document: the plan gate is where the task titles come from.
     if (s.gate) this.plan.noteGate(s.gate.phase, s.gate.artifact_path, s.gate.artifact, s.planProgress?.total);
     if (!s.busy) this.action.reset();
+    else s.userStopped = false;                      // NEO is running a turn the user did not stop
     if (s.project) {
       s.project.name = d.project.name;
       if (d.project.idea) s.project.idea = d.project.idea;
@@ -760,6 +781,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       // A new message answers whatever the last stall or stop said.
       this.notice = null;
       this.state.stoppedAt = undefined;
+      this.clearAttention();
       // Sent: these chips are now part of the message. Anything attached meanwhile stays.
       this.attachments = this.attachments.filter((a) => !sending.includes(a));
       this.postState();
@@ -773,6 +795,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     if (!project) return;
     this.notice = null;
     this.state.stoppedAt = undefined;
+    this.clearAttention();
     try {
       if (m.answers && m.answers.length) {
         await this.client.answer(project.id, { answers: m.answers });
@@ -812,8 +835,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     }
   }
 
+  /**
+   * The user acted (wrote, answered, decided a gate): NEO clears its stall at once, and the copy here
+   * would otherwise say "Waiting on you" until the next re-read. A new stall arrives as a new notice.
+   */
+  private clearAttention(): void {
+    this.state.needsAttention = false;
+    this.state.attentionReason = null;
+    this.state.userStopped = false;
+  }
+
   private gateClosed(phase: string): void {
     // The phase NEO just reported, not one worked out here.
+    this.clearAttention();
     this.state.phase = phase;
     this.state.atGate = phase.endsWith("-gate");
     if (!this.state.atGate) this.state.gate = null;
@@ -881,6 +915,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.stopRequestedAt = 0;
     if (!s.busy) {
       s.stoppedAt = Date.now();
+      // NEO confirmed the turn ended after the user's Stop: what it says about that turn next is the Stop.
+      s.userStopped = true;
       this.action.reset();
     }
   }
@@ -989,6 +1025,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       attentionReason: null,
       planProgress: null,
       stopping: false,
+      userStopped: false,
       catchingUp: false,
       attachments: [],
       suggestion: null,
@@ -999,9 +1036,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.state.attachments = this.attachments.map(viewOf);
     this.state.suggestion = this.state.mode === "project" ? this.suggestion() : null;
     this.settleStopping();
+    // NEO's count - or, once Execute is over and NEO's has dropped, the furthest one remembered.
+    const plan = this.plan.view(this.state.planProgress, this.state.phase, this.lastSeq);
     this.state.live = buildLive(
-      this.state,
-      this.plan.current(this.state.planProgress),
+      { ...this.state, planProgress: plan.progress },
+      plan.task,
       this.action.current(),
       liveNotice(this.notice, this.state.busy),
     );

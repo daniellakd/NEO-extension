@@ -5,8 +5,8 @@
 // itself: no phase, no count and no state is worked out here.
 //
 // Shown, top to bottom, only when there is something to say:
-//   Task 3 of 8 - Implement CRUD routes      (the plan step being worked on)
-//   [=====------]  3 of 8 done               (how much of the plan is complete)
+//   Task 3 of 8 - Implement CRUD routes      (the plan task being worked on; hover: every task)
+//   [=====------]  2/8 tasks - 9 of 30 steps (how much of the plan is complete)
 //   * Editing main.py                        (what NEO is doing right now)
 //   ! Waiting on you: ...                    (stalled / interrupted / stopped / reconnecting)
 (function () {
@@ -52,19 +52,33 @@
     seen.retryAt = 0;
   }
 
+  /** Every task of the plan, one per line: ✓ done, ▸ the current one. Hover text only. */
+  function outlineTip(tasks) {
+    return tasks
+      .map((t, i) => `${t.state === "done" ? "✓" : t.state === "current" ? "▸" : "  "} ${i + 1}. ${t.title || `Task ${i + 1}`}`)
+      .join("\n");
+  }
+
   function taskRow(task) {
     const row = el("div", "live-task");
-    row.appendChild(el("span", "live-step", `Task ${task.index} of ${task.total}`));
-    if (task.title) {
-      row.appendChild(el("span", "live-sep", "·"));
-      const title = el("span", "live-title", task.title);
-      title.title = task.title;                 // the full title when the sidebar is narrow
-      row.appendChild(title);
+    const tip = task.tasks ? outlineTip(task.tasks) : "";
+    if (task.complete) {
+      row.appendChild(el("span", "live-step", `All ${task.total} tasks done`));
+    } else {
+      row.appendChild(el("span", "live-step", `Task ${task.index} of ${task.total}`));
+      if (task.title) {
+        row.appendChild(el("span", "live-sep", "·"));
+        const title = el("span", "live-title", task.title);
+        title.title = tip || task.title;        // the full title when the sidebar is narrow
+        row.appendChild(title);
+      }
     }
+    if (tip) row.title = tip;
     return row;
   }
 
-  function progressRow(progress) {
+  /** Steps done on the bar; with task headings, how many whole tasks are done ahead of it. */
+  function progressRow(progress, task) {
     const done = Math.max(0, Math.min(progress.done, progress.total));
     const row = el("div", "live-progress");
     const bar = el("div", "live-bar");
@@ -73,8 +87,17 @@
     if (done >= progress.total) fill.classList.add("full");
     bar.appendChild(fill);
     row.appendChild(bar);
-    const count = el("span", "live-count", `${done} of ${progress.total} done`);
-    count.title = `${done} of ${progress.total} plan tasks complete`;
+    const byTask = task && task.unit === "task";
+    // Two unbreakable parts: a narrow sidebar wraps between them, not inside "5 of 18".
+    const count = el("span", "live-count");
+    if (byTask) {
+      count.appendChild(el("span", "live-count-part", `${task.tasksDone}/${task.total} tasks`));
+      count.appendChild(document.createTextNode(" · "));
+    }
+    count.appendChild(el("span", "live-count-part", `${done} of ${progress.total} steps`));
+    count.title = byTask
+      ? `${task.tasksDone} of ${task.total} plan tasks and ${done} of ${progress.total} plan steps complete`
+      : `${done} of ${progress.total} plan steps complete`;
     row.appendChild(count);
     return row;
   }
@@ -146,7 +169,7 @@
     // progress only when it means something, so there is only ever one rule for it.
     const onPlan = Boolean(live.progress && live.progress.total > 0);
     if (onPlan && live.task) rows.push(taskRow(live.task));
-    if (onPlan) rows.push(progressRow(live.progress));
+    if (onPlan) rows.push(progressRow(live.progress, live.task));
     if (live.action) rows.push(actionRow(live.action));
     const stream = streamRow(live.stream);
     if (stream) rows.push(stream);

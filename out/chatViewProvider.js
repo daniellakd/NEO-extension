@@ -391,6 +391,9 @@ class ChatViewProvider {
             if (ev.kind === "gate") {
                 this.plan.noteGate(ev.phase, ev.artifact_path, ev.artifact, detail.plan_progress?.total);
             }
+            // A re-plan while this window was closed makes the remembered progress stale.
+            if (ev.kind === "gate" || ev.kind === "phase")
+                this.plan.notePhase(ev.phase, ev.seq);
         }
         this.applyDetail(detail);
         const events = detail.history.filter((e) => !IGNORED_KINDS.has(e.kind));
@@ -459,7 +462,10 @@ class ChatViewProvider {
         this.stopRequestedAt = 0;
         this.state.stopping = false;
         this.state.stoppedAt = undefined;
+        this.state.userStopped = false;
         this.state.catchingUp = false;
+        // This stream is closed: "up" belongs to the project just left, not to the next one.
+        this.state.stream = "off";
         this.state.streamRetryAt = undefined;
     }
     /**
@@ -528,12 +534,17 @@ class ChatViewProvider {
         // What NEO is doing right now, from the events it already sends. Reading only: this never
         // writes a phase, a gate or a count.
         this.action.note(ev, s.phase);
+        // A step was probably just ticked: re-read now rather than at the next 10-second tick.
+        if ((0, progress_1.touchesPlan)(ev))
+            setTimeout(() => void this.resync(), 300);
         switch (ev.kind) {
             case "phase": {
                 const phase = String(ev.phase ?? "");
                 if (!phase)
                     break;
                 s.phase = phase;
+                s.userStopped = false;
+                this.plan.notePhase(phase, ev.seq);
                 this.notice = null; // a new phase answers whatever the last one said
                 if (!phase.endsWith("-gate")) {
                     s.atGate = false;
@@ -548,6 +559,7 @@ class ChatViewProvider {
                 this.notice = null; // a gate is the new state; the old one is history
                 if (typeof ev.phase === "string")
                     s.phase = ev.phase;
+                this.plan.notePhase(ev.phase, ev.seq);
                 this.plan.noteGate(ev.phase, ev.artifact_path, ev.artifact, s.planProgress?.total);
                 s.gate = {
                     phase: typeof ev.phase === "string" ? ev.phase : s.phase,
@@ -565,6 +577,8 @@ class ChatViewProvider {
             case "status":
                 if (typeof ev.busy === "boolean")
                     s.busy = ev.busy;
+                if (ev.busy === true)
+                    s.userStopped = false; // a new turn: whatever ends it is not the Stop
                 break;
             case "idle":
                 s.busy = false;
@@ -574,6 +588,10 @@ class ChatViewProvider {
                 s.pendingRequest = null;
                 this.notice = null; // the user answered: a stall notice is over
                 s.stoppedAt = undefined;
+                s.userStopped = false;
+                // NEO clears its stall when the user writes; this copy follows at the next re-read.
+                s.needsAttention = false;
+                s.attentionReason = null;
                 break;
             case "question":
                 s.awaiting = true;
@@ -583,7 +601,8 @@ class ChatViewProvider {
                 // Only the notices that describe a state the user is still in reach the live line; every
                 // notice is drawn in the transcript either way, so nothing is said twice.
                 const held = (0, progress_1.noticeOf)(ev);
-                if (held)
+                // The stall NEO reports for the turn the user stopped is the Stop, said as such by buildLive.
+                if (held && !(s.userStopped && (0, progress_1.stopExplains)(ev.stalled)))
                     this.notice = held;
                 break;
             }
@@ -639,6 +658,8 @@ class ChatViewProvider {
             this.plan.noteGate(s.gate.phase, s.gate.artifact_path, s.gate.artifact, s.planProgress?.total);
         if (!s.busy)
             this.action.reset();
+        else
+            s.userStopped = false; // NEO is running a turn the user did not stop
         if (s.project) {
             s.project.name = d.project.name;
             if (d.project.idea)
@@ -716,6 +737,7 @@ class ChatViewProvider {
             // A new message answers whatever the last stall or stop said.
             this.notice = null;
             this.state.stoppedAt = undefined;
+            this.clearAttention();
             // Sent: these chips are now part of the message. Anything attached meanwhile stays.
             this.attachments = this.attachments.filter((a) => !sending.includes(a));
             this.postState();
@@ -730,6 +752,7 @@ class ChatViewProvider {
             return;
         this.notice = null;
         this.state.stoppedAt = undefined;
+        this.clearAttention();
         try {
             if (m.answers && m.answers.length) {
                 await this.client.answer(project.id, { answers: m.answers });
@@ -773,8 +796,18 @@ class ChatViewProvider {
             this.gateRefused(err);
         }
     }
+    /**
+     * The user acted (wrote, answered, decided a gate): NEO clears its stall at once, and the copy here
+     * would otherwise say "Waiting on you" until the next re-read. A new stall arrives as a new notice.
+     */
+    clearAttention() {
+        this.state.needsAttention = false;
+        this.state.attentionReason = null;
+        this.state.userStopped = false;
+    }
     gateClosed(phase) {
         // The phase NEO just reported, not one worked out here.
+        this.clearAttention();
         this.state.phase = phase;
         this.state.atGate = phase.endsWith("-gate");
         if (!this.state.atGate)
@@ -845,6 +878,8 @@ class ChatViewProvider {
         this.stopRequestedAt = 0;
         if (!s.busy) {
             s.stoppedAt = Date.now();
+            // NEO confirmed the turn ended after the user's Stop: what it says about that turn next is the Stop.
+            s.userStopped = true;
             this.action.reset();
         }
     }
@@ -952,6 +987,7 @@ class ChatViewProvider {
             attentionReason: null,
             planProgress: null,
             stopping: false,
+            userStopped: false,
             catchingUp: false,
             attachments: [],
             suggestion: null,
@@ -961,7 +997,9 @@ class ChatViewProvider {
         this.state.attachments = this.attachments.map(context_1.viewOf);
         this.state.suggestion = this.state.mode === "project" ? this.suggestion() : null;
         this.settleStopping();
-        this.state.live = (0, progress_1.buildLive)(this.state, this.plan.current(this.state.planProgress), this.action.current(), (0, progress_1.liveNotice)(this.notice, this.state.busy));
+        // NEO's count - or, once Execute is over and NEO's has dropped, the furthest one remembered.
+        const plan = this.plan.view(this.state.planProgress, this.state.phase, this.lastSeq);
+        this.state.live = (0, progress_1.buildLive)({ ...this.state, planProgress: plan.progress }, plan.task, this.action.current(), (0, progress_1.liveNotice)(this.notice, this.state.busy));
         this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
         this.post({ type: "state", state: this.state });
     }

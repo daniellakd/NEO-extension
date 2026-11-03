@@ -34,7 +34,8 @@
 
 /* --- how much of the plan is done ----------------------------------------------------------- */
 
-.live-progress { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* In a narrow sidebar the count drops under the bar instead of being cut off (see .live-count). */
+.live-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
 .live-bar {
   flex: 1;
   min-width: 40px;
@@ -50,7 +51,16 @@
   transition: width 240ms ease-out;
 }
 .live-fill.full { background: var(--pass); }
-.live-count { flex: none; font-variant-numeric: tabular-nums; }
+/* Beside the bar while it fits; on its own line, right-aligned, when it does not - and narrower still,
+   it breaks between "1/4 tasks" and "5 of 18 steps", never inside a number. */
+.live-count {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.live-count-part { white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .live-fill { transition: none; } }
 
 /* --- what NEO is doing right now ------------------------------------------------------------ */
