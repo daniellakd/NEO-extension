@@ -30,6 +30,7 @@ const vscode = __importStar(require("vscode"));
 const neoClient_1 = require("./neoClient");
 const context_1 = require("./context");
 const progress_1 = require("./progress");
+const changes_1 = require("./changes");
 const sseStream_1 = require("./sseStream");
 const workspace_1 = require("./workspace");
 /**
@@ -88,6 +89,8 @@ class ChatViewProvider {
     lastEditor;
     editorTimer;
     disposables = [];
+    // What NEO produced (src/changes.ts): the changed files and their diffs.
+    changes = new changes_1.ChangesController((m) => this.post(m));
     constructor(extensionUri, store) {
         this.extensionUri = extensionUri;
         this.client = new neoClient_1.NeoClient(serverUrl());
@@ -115,6 +118,7 @@ class ChatViewProvider {
         if (this.editorTimer)
             clearTimeout(this.editorTimer);
         this.disposables.forEach((d) => d.dispose());
+        this.changes.dispose();
     }
     // --- workspace context ------------------------------------------------------------------
     /** Follow the user's file editor; the suggested chip changes with it, debounced. */
@@ -643,6 +647,10 @@ class ChatViewProvider {
     }
     // --- webview actions --------------------------------------------------------------------
     async onMessage(m) {
+        if (m.type.startsWith("changes.")) {
+            await this.changes.onMessage(m);
+            return;
+        }
         switch (m.type) {
             case "ready":
                 this.postState();
@@ -954,6 +962,7 @@ class ChatViewProvider {
         this.state.suggestion = this.state.mode === "project" ? this.suggestion() : null;
         this.settleStopping();
         this.state.live = (0, progress_1.buildLive)(this.state, this.plan.current(this.state.planProgress), this.action.current(), (0, progress_1.liveNotice)(this.notice, this.state.busy));
+        this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
         this.post({ type: "state", state: this.state });
     }
     post(message) {
@@ -970,6 +979,7 @@ class ChatViewProvider {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="${media("chat.css")}">
 <link rel="stylesheet" href="${media("progress.css")}">
+<link rel="stylesheet" href="${media("changes.css")}">
 <title>NEO</title>
 </head>
 <body>
@@ -1029,6 +1039,8 @@ class ChatViewProvider {
 
   <main id="transcript" class="transcript" aria-live="polite"></main>
 
+  <section id="changes" class="changes hidden" aria-label="Files NEO changed"></section>
+
   <section id="gate" class="card gate hidden">
     <div class="gate-head">
       <span class="gate-badge">Gate</span>
@@ -1039,6 +1051,7 @@ class ChatViewProvider {
       <summary id="gate-doc-summary">document</summary>
       <div id="gate-doc-body" class="md"></div>
     </details>
+    <div id="gate-changes" class="gate-changes hidden"></div>
     <ul id="gate-checks" class="checks"></ul>
     <div id="gate-refusal" class="refusal hidden"></div>
     <textarea id="gate-text" rows="3" placeholder="What should change? (required for Request Changes)"></textarea>
@@ -1073,6 +1086,7 @@ class ChatViewProvider {
 </div>
 <script nonce="${nonce}" src="${media("progress.js")}"></script>
 <script nonce="${nonce}" src="${media("chat.js")}"></script>
+<script nonce="${nonce}" src="${media("changes.js")}"></script>
 </body>
 </html>`;
     }

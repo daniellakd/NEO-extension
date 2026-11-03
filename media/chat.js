@@ -5,6 +5,7 @@
   "use strict";
 
   const vscode = acquireVsCodeApi();
+  window.neoPost = (message) => vscode.postMessage(message);   // for media/changes.js: the API can be acquired once
   const $ = (id) => document.getElementById(id);
 
   const view = {
@@ -262,6 +263,7 @@
         if (!entry) {
           startNeoTurn(t);
           const node = el("details", "msg tool");
+          node.dataset.part = String(ev.part);           // media/changes.js links its file
           const summary = el("summary");
           const status = el("span", "tool-status");
           const title = el("span", "tool-title");
