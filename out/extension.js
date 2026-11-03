@@ -32,7 +32,9 @@ const chatViewProvider_1 = require("./chatViewProvider");
  * never runs any part of its pipeline; it reads NEO's state and forwards the user's actions.
  */
 function activate(context) {
-    const provider = new chatViewProvider_1.ChatViewProvider(context.extensionUri);
+    // `globalState` remembers each project's plan, so "Task 3 of 8 · Implement CRUD routes" is
+    // still there after a window reload in the middle of Execute.
+    const provider = new chatViewProvider_1.ChatViewProvider(context.extensionUri, context.globalState);
     context.subscriptions.push(provider, vscode.window.registerWebviewViewProvider(chatViewProvider_1.ChatViewProvider.viewId, provider, {
         // The transcript is rebuilt from the host on reload, but keeping it alive avoids a redraw —
         // and losing a half-typed gate reason — every time the sidebar is switched away from.
