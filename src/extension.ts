@@ -6,7 +6,9 @@ import { ChatViewProvider } from "./chatViewProvider";
  * never runs any part of its pipeline; it reads NEO's state and forwards the user's actions.
  */
 export function activate(context: vscode.ExtensionContext): void {
-  const provider = new ChatViewProvider(context.extensionUri);
+  // `globalState` remembers each project's plan, so "Task 3 of 8 · Implement CRUD routes" is
+  // still there after a window reload in the middle of Execute.
+  const provider = new ChatViewProvider(context.extensionUri, context.globalState);
 
   context.subscriptions.push(
     provider,

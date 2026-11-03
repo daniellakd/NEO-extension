@@ -1,0 +1,100 @@
+/* NEO sidebar: the live progress panel (#live).
+   Loaded after chat.css and reuses its theme variables, so it follows the user's theme exactly as
+   the rest of the panel does. Scoped to .live* class names only - nothing here restyles the chat. */
+
+.live {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8em;
+  color: var(--muted);
+  min-width: 0;
+}
+
+/* --- the plan step being worked on --------------------------------------------------------- */
+
+.live-task {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  color: var(--vscode-foreground);
+}
+.live-step { flex: none; font-weight: 700; letter-spacing: 0.01em; }
+.live-sep { flex: none; color: var(--muted); opacity: 0.7; }
+/* The title is the first thing to give up width in a narrow sidebar. */
+.live-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+/* --- how much of the plan is done ----------------------------------------------------------- */
+
+/* In a narrow sidebar the count drops under the bar instead of being cut off (see .live-count). */
+.live-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
+.live-bar {
+  flex: 1;
+  min-width: 40px;
+  height: 4px;
+  background: var(--code-bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.live-fill {
+  height: 100%;
+  width: 0;
+  background: var(--vscode-progressBar-background, var(--accent));
+  transition: width 240ms ease-out;
+}
+.live-fill.full { background: var(--pass); }
+/* Beside the bar while it fits; on its own line, right-aligned, when it does not - and narrower still,
+   it breaks between "1/4 tasks" and "5 of 18 steps", never inside a number. */
+.live-count {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.live-count-part { white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .live-fill { transition: none; } }
+
+/* --- what NEO is doing right now ------------------------------------------------------------ */
+
+.live-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--vscode-foreground);
+}
+.live-action .spinner { width: 9px; height: 9px; color: var(--accent); }
+.live-action-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* --- stalled / interrupted / stopped / reconnecting ------------------------------------------ */
+
+.live-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  line-height: 1.4;
+}
+.live-note .spinner { width: 9px; height: 9px; flex: none; }
+.live-note-mark { flex: none; font-weight: 700; }
+.live-note-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.live-note.warn { color: var(--warn); }
+.live-note.ok { color: var(--pass); }
+.live-note.info { color: var(--muted); }
+.live-retry { font-variant-numeric: tabular-nums; opacity: 0.85; }
+
+/* --- Stop, while it is being honoured -------------------------------------------------------
+   The button lives in the composer (chat.css); only the states this feature added are here. */
+
+button.stop:disabled { opacity: 0.65; cursor: default; }
+button.stop.stopping { color: var(--warn); }
+.status-text.done { color: var(--pass); }

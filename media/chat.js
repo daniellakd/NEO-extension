@@ -524,19 +524,11 @@
     const working = connected && inProject && s.busy && !s.awaiting && !s.atGate;
     renderRail(inProject ? s.stages : []);
 
-    const progress = s.planProgress;
-    const showProgress = Boolean(progress && progress.total && s.phase === "execute");
-    show("progress", showProgress);
-    if (showProgress) {
-      const done = Math.min(progress.done, progress.total);
-      $("progress-bar").style.width = `${Math.round((done / progress.total) * 100)}%`;
-      $("progress-text").textContent = `${done}/${progress.total} plan steps`;
-    }
-    // Only the exceptional case (a stall) reaches the header. An open question or a gate is
-    // ordinary waiting, and the footer under the input already says so.
-    const attention = s.needsAttention && s.attentionReason && !s.awaiting && !s.atGate ? s.attentionReason : "";
-    show("attention", Boolean(attention));
-    $("attention").textContent = attention ? `Waiting on you: ${attention}` : "";
+    // Current plan task, plan progress, current action, and the single line for a stall, a stop
+    // or a reconnect. All of it is computed by the host (src/progress.ts) and drawn into #live by
+    // media/progress.js, so nothing here has to work out a count or a state.
+    const live = s.live || null;
+    if (window.NeoProgress) window.NeoProgress.render(live);
 
     renderBanner(s);
     show("transcript", inProject);
@@ -555,8 +547,8 @@
       ? "Describe what you want built — this starts the project"
       : s.awaiting ? "Answer NEO…" : working ? "NEO is working — you can type, Send unlocks when it stops"
       : s.atGate ? "Message NEO, or use the gate above" : "Message NEO…";
-    show("abort", working);
-    renderComposerStatus(s, connected, working, phase, kind);
+    renderStop(live, working);
+    renderComposerStatus(s, connected, working, phase, kind, live);
     renderContext(s);
 
     if (inProject) renderGate(s);
@@ -598,24 +590,43 @@
     show("context-row", row.childElementCount > 0);
   }
 
-  /** The line under the input: what NEO is doing right now, in the phase it is doing it. */
-  function renderComposerStatus(s, connected, working, phase, kind) {
+  /**
+   * The line under the input: the phase, and one word for what NEO is doing in it. The words come
+   * from the host so that this line and the live panel above can never contradict each other.
+   */
+  function renderComposerStatus(s, connected, working, phase, kind, live) {
     const box = $("composer-status");
     box.innerHTML = "";
     const chip = el("span", `chip ${kind}`, phaseName(phase));
     chip.title = phase ? stageLabel(phase) : "";
     if (phase) box.appendChild(chip);
-    let text = "";
-    let cls = "";
-    if (!connected) text = "not connected";
-    else if (working) { text = "working"; cls = "working"; }
-    else if (s.awaiting) { text = "waiting for your answer"; cls = "attention"; }
-    else if (s.atGate) { text = "waiting for your approval"; cls = "attention"; }
-    else if (s.needsAttention) { text = "waiting on you"; cls = "attention"; }
+    const activity = live ? live.activity : connected ? "idle" : "offline";
+    const text = live ? live.label : connected ? "" : "not connected";
+    if (!text) return;
+    const cls = { working: "working", stopping: "working", awaiting: "attention", gate: "attention",
+                  attention: "attention", offline: "", stopped: "", done: "done", idle: "" }[activity] || "";
     const line = el("span", `status-text ${cls}`);
-    if (working) line.appendChild(el("span", "spinner"));
+    if (working || activity === "stopping") line.appendChild(el("span", "spinner"));
     line.appendChild(document.createTextNode(text));
-    if (text) box.appendChild(line);
+    // The whole story, including what Stop would do, is one hover away.
+    line.title = live ? live.detail : "";
+    box.appendChild(line);
+  }
+
+  /**
+   * Stop. Offered only while NEO is actually running a turn — never while it waits for an answer,
+   * waits at a gate, is idle, or is done — and it says what it does before and after the click.
+   */
+  function renderStop(live, working) {
+    const button = $("abort");
+    const stopping = Boolean(live && live.activity === "stopping");
+    show("abort", Boolean(working || stopping));
+    $("abort-label").textContent = stopping ? "Stopping…" : "Stop";
+    button.disabled = stopping;
+    button.classList.toggle("stopping", stopping);
+    button.title = stopping
+      ? "Stop was sent. NEO is ending the running turn; this takes a moment."
+      : (live && live.stopHint) || "Stop the running turn";
   }
 
   function renderRail(stages) {
