@@ -65,6 +65,12 @@
         "icon": "$(list-selection)"
       },
       {
+        "command": "neo.sessions",
+        "title": "Sessions",
+        "category": "NEO",
+        "icon": "$(history)"
+      },
+      {
         "command": "neo.addContext",
         "title": "Add Context to Message…",
         "category": "NEO"
@@ -105,9 +111,14 @@
           "group": "navigation@3"
         },
         {
-          "command": "neo.refresh",
+          "command": "neo.sessions",
           "when": "view == neo.chat",
           "group": "navigation@4"
+        },
+        {
+          "command": "neo.refresh",
+          "when": "view == neo.chat",
+          "group": "navigation@5"
         },
         {
           "command": "neo.connect",

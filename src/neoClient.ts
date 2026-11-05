@@ -67,11 +67,52 @@ export interface NeoEvent {
   [field: string]: unknown;
 }
 
+/**
+ * A NEO work session: one thing someone asked for (the build, a change afterwards). Not the agent
+ * runtime's session (the `ses_…` id in `Project.session_id`), which means nothing to the user.
+ */
+export interface NeoSession {
+  id: string;
+  project_id?: string;
+  kind: string;
+  title: string;
+  request?: string | null;
+  /** Seconds since the epoch, NEO's clock. */
+  created_at: number;
+  /** Set only when another session started after it. */
+  ended_at: number | null;
+  events?: number;
+  messages?: number;
+  /** The seq of the session's first and last stored event; null while it has none. */
+  first_event?: number | null;
+  last_event?: number | null;
+}
+
+export interface SessionKind {
+  label?: string;
+  description?: string;
+  phase?: string;
+}
+
+/** One row of NEO's gate audit trail. `created_at` is NEO's clock. */
+export interface GateEvent {
+  id?: string;
+  phase: string;
+  action: string;
+  manual?: number;
+  feedback?: string | null;
+  created_at: number;
+}
+
 export interface ProjectDetail {
   project: Project;
   phase: string;
   at_gate: boolean;
+  /** The NEO work session this read is about: the newest one unless `session` was asked for. */
   session_id: string | null;
+  /** Every session of the project, oldest first. Absent from NEO versions without sessions. */
+  sessions?: NeoSession[];
+  gate_events?: GateEvent[];
   gate: Gate | null;
   busy: boolean;
   awaiting_answer: boolean;
@@ -110,8 +151,18 @@ export class NeoClient {
     return data.projects ?? [];
   }
 
-  project(id: string, history: number): Promise<ProjectDetail> {
-    return this.request("GET", `/api/projects/${enc(id)}?history=${history}`);
+  /** `session` reads an earlier session's history; it never changes which session is active. */
+  project(id: string, history: number, session?: string): Promise<ProjectDetail> {
+    const scope = session ? `&session=${enc(session)}` : "";
+    return this.request("GET", `/api/projects/${enc(id)}?history=${history}${scope}`);
+  }
+
+  async sessions(id: string): Promise<{ sessions: NeoSession[]; kinds: Record<string, SessionKind> }> {
+    const data = await this.request<{ sessions?: NeoSession[]; kinds?: Record<string, SessionKind> }>(
+      "GET",
+      `/api/projects/${enc(id)}/sessions`,
+    );
+    return { sessions: data.sessions ?? [], kinds: data.kinds ?? {} };
   }
 
   createProject(body: CreateProjectBody): Promise<Project> {

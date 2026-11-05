@@ -31,6 +31,8 @@ const neoClient_1 = require("./neoClient");
 const context_1 = require("./context");
 const progress_1 = require("./progress");
 const changes_1 = require("./changes");
+const plan_1 = require("./plan");
+const sessions_1 = require("./sessions");
 const sseStream_1 = require("./sseStream");
 const workspace_1 = require("./workspace");
 /**
@@ -91,12 +93,24 @@ class ChatViewProvider {
     disposables = [];
     // What NEO produced (src/changes.ts): the changed files and their diffs.
     changes = new changes_1.ChangesController((m) => this.post(m));
+    // What NEO designed and plans to build (src/plan.ts): the documents before Execute.
+    artifacts = new plan_1.PlanArtifacts();
+    // NEO's sessions, "since you were away", and the read-only session snapshots (src/sessions.ts).
+    sessions;
     constructor(extensionUri, store) {
         this.extensionUri = extensionUri;
         this.client = new neoClient_1.NeoClient(serverUrl());
         // A plan read from disk arrives after the state that needed it; repaint when it does.
         this.plan = new progress_1.PlanTracker(store, () => this.postState());
         this.state = this.blankState("connecting");
+        this.sessions = new sessions_1.SessionsController({
+            client: () => this.client,
+            store,
+            changed: () => this.postState(),
+            // "Seen" means on screen: the sidebar is visible and the window has focus.
+            viewed: () => Boolean(this.view?.visible) && (vscode.window.state?.focused ?? true),
+            projectName: () => this.state.project?.name,
+        });
         this.trackEditor(vscode.window.activeTextEditor);
         this.disposables.push(vscode.window.onDidChangeActiveTextEditor((e) => this.trackEditor(e)), vscode.window.onDidChangeTextEditorSelection((e) => this.trackEditor(e.textEditor)));
     }
@@ -112,6 +126,8 @@ class ChatViewProvider {
         view.onDidDispose(() => {
             this.view = undefined;
         });
+        // Showing the sidebar is when unseen activity becomes seen (src/sessions.ts).
+        view.onDidChangeVisibility?.(() => this.postState());
     }
     dispose() {
         this.stopProject();
@@ -119,6 +135,7 @@ class ChatViewProvider {
             clearTimeout(this.editorTimer);
         this.disposables.forEach((d) => d.dispose());
         this.changes.dispose();
+        this.sessions.dispose();
     }
     // --- workspace context ------------------------------------------------------------------
     /** Follow the user's file editor; the suggested chip changes with it, debounced. */
@@ -356,6 +373,10 @@ class ChatViewProvider {
         this.state.project = undefined;
         await this.loadProject(picked.id, gen);
     }
+    /** NEO: Sessions — the project's sessions; one picked opens as a read-only snapshot. */
+    showSessions() {
+        return this.sessions.pick();
+    }
     /** Whether the selected project is the one living in the open folder. */
     folderIsSelectedProject() {
         const { project, folder } = this.state;
@@ -385,6 +406,8 @@ class ChatViewProvider {
         this.state.mode = "project";
         this.state.project = { id: p.id, name: p.name, path: p.path, idea: p.idea ?? undefined };
         this.plan.start(p.id, p.path);
+        // Reads the last-seen anchor before anything below can mark this history as seen.
+        this.sessions.open(p.id, detail);
         // The plan gate may be far behind in the history (or gone from the window entirely). Every
         // gate in what was read is offered; only the plan's own document is kept.
         for (const ev of detail.history) {
@@ -457,6 +480,7 @@ class ChatViewProvider {
         this.lastSeq = 0;
         this.transcript = [];
         this.plan.stop();
+        this.sessions.close();
         this.action.reset();
         this.notice = null;
         this.stopRequestedAt = 0;
@@ -505,6 +529,7 @@ class ChatViewProvider {
             if (ev.seq <= this.lastSeq)
                 return;
             this.lastSeq = ev.seq;
+            this.sessions.noteEvent(ev);
         }
         this.applyEvent(ev);
         if (IGNORED_KINDS.has(ev.kind))
@@ -653,6 +678,8 @@ class ChatViewProvider {
         s.needsAttention = Boolean(d.needs_attention);
         s.attentionReason = d.attention_reason ?? null;
         s.planProgress = d.plan_progress ?? null;
+        this.artifacts.noteDetail(d);
+        this.sessions.noteDetail(d);
         // An open gate carries its document: the plan gate is where the task titles come from.
         if (s.gate)
             this.plan.noteGate(s.gate.phase, s.gate.artifact_path, s.gate.artifact, s.planProgress?.total);
@@ -668,6 +695,14 @@ class ChatViewProvider {
     }
     // --- webview actions --------------------------------------------------------------------
     async onMessage(m) {
+        if (m.type.startsWith("plan.")) {
+            await this.artifacts.onMessage(m);
+            return;
+        }
+        if (m.type.startsWith("sessions.")) {
+            await this.sessions.onMessage(m);
+            return;
+        }
         if (m.type.startsWith("changes.")) {
             await this.changes.onMessage(m);
             return;
@@ -999,8 +1034,13 @@ class ChatViewProvider {
         this.settleStopping();
         // NEO's count - or, once Execute is over and NEO's has dropped, the furthest one remembered.
         const plan = this.plan.view(this.state.planProgress, this.state.phase, this.lastSeq);
+        // Before the state goes out: unseen activity on screen now is summarised, then marked seen.
+        if (this.state.mode === "project")
+            this.sessions.sync(this.lastSeq, this.state, plan.progress);
+        this.state.sessions = this.state.mode === "project" ? this.sessions.view() : undefined;
         this.state.live = (0, progress_1.buildLive)({ ...this.state, planProgress: plan.progress }, plan.task, this.action.current(), (0, progress_1.liveNotice)(this.notice, this.state.busy));
         this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
+        this.state.artifacts = this.artifacts.build({ ...this.state, stages: this.state.stages });
         this.post({ type: "state", state: this.state });
     }
     post(message) {
@@ -1018,6 +1058,8 @@ class ChatViewProvider {
 <link rel="stylesheet" href="${media("chat.css")}">
 <link rel="stylesheet" href="${media("progress.css")}">
 <link rel="stylesheet" href="${media("changes.css")}">
+<link rel="stylesheet" href="${media("plan.css")}">
+<link rel="stylesheet" href="${media("sessions.css")}">
 <title>NEO</title>
 </head>
 <body>
@@ -1049,6 +1091,8 @@ class ChatViewProvider {
     <!-- Live progress: current plan task, plan progress, current action, and the one line that
          says whether NEO is stalled, stopped or reconnecting. Owned by media/progress.js. -->
     <div id="live" class="live hidden" aria-live="polite"></div>
+    <!-- The Design and Plan documents and where each stands. Owned by media/plan.js. -->
+    <div id="artifacts" class="artifacts hidden"></div>
   </header>
 
   <section id="banner" class="banner hidden"></section>
@@ -1075,6 +1119,9 @@ class ChatViewProvider {
     </div>
   </section>
 
+  <!-- "Since you were away": what NEO stored after the user last saw this project. Owned by media/sessions.js. -->
+  <section id="away" class="card away hidden" aria-live="polite"></section>
+
   <main id="transcript" class="transcript" aria-live="polite"></main>
 
   <section id="changes" class="changes hidden" aria-label="Files NEO changed"></section>
@@ -1085,6 +1132,7 @@ class ChatViewProvider {
       <strong id="gate-title"></strong>
     </div>
     <div class="muted small">phase <code id="gate-phase"></code> · <code id="gate-path"></code></div>
+    <div id="gate-artifact" class="gate-artifact hidden"></div>
     <details id="gate-doc" class="gate-doc">
       <summary id="gate-doc-summary">document</summary>
       <div id="gate-doc-body" class="md"></div>
@@ -1125,6 +1173,8 @@ class ChatViewProvider {
 <script nonce="${nonce}" src="${media("progress.js")}"></script>
 <script nonce="${nonce}" src="${media("chat.js")}"></script>
 <script nonce="${nonce}" src="${media("changes.js")}"></script>
+<script nonce="${nonce}" src="${media("plan.js")}"></script>
+<script nonce="${nonce}" src="${media("sessions.js")}"></script>
 </body>
 </html>`;
     }

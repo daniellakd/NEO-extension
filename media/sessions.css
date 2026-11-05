@@ -1,0 +1,91 @@
+/* NEO sidebar: sessions and "since you were away" (media/sessions.js). Theme variables only, as in
+   chat.css; the custom properties used here (--border, --muted, --accent…) are defined there. */
+
+/* --- since you were away ------------------------------------------------------------------ */
+
+.card.away {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  flex: none;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.away-head { display: flex; align-items: baseline; gap: 8px; }
+.away-head strong { font-size: 0.95em; }
+.away-head .away-close { margin-left: auto; align-self: center; font-size: 1.1em; line-height: 1; }
+.away-items { margin: 6px 0 0; padding-left: 18px; font-size: 0.9em; }
+.away-items li { margin: 2px 0; }
+.away-at { margin-left: 6px; }
+.away-note { margin: 6px 0 0; }
+.away-now {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 0.9em;
+}
+.away-now-label {
+  flex: none;
+  font-size: 0.8em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding-top: 1px;
+}
+.away-actions { display: flex; gap: 12px; margin-top: 6px; }
+
+/* A text-like button: the actions here are secondary to the chat's own. */
+.away button.link,
+.session-mark button.link {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+.away button.link:hover,
+.session-mark button.link:hover { text-decoration: underline; }
+
+/* --- session markers in the transcript ---------------------------------------------------- */
+
+.session-mark {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  padding: 4px 0 6px;
+  font-size: 0.82em;
+  border-bottom: 1px solid var(--border);
+}
+.session-sep { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 6px; }
+.session-tag {
+  flex: none;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.session-tag.current { color: var(--accent); }
+.session-tag.previous { color: var(--muted); }
+.session-title { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.session-facts { min-width: 0; }
+.session-tools { margin-left: auto; }
+.session-more { flex-basis: 100%; }
+
+/* "New since your last visit": the existing divider, in the accent colour. */
+.divider.sessions-new { color: var(--accent); }
+.divider.sessions-new::before, .divider.sessions-new::after { border-top-color: var(--accent); }
+
+/* Messages NEO sends on its own (auto-continue, repair, approval…) are part of the record but not
+   the conversation: drawn quieter than the user's own. "answer" is the user's reply to a question. */
+.msg.user[data-note]:not([data-note="answer"]) {
+  opacity: 0.7;
+  font-size: 0.9em;
+  background: transparent;
+  border-style: dashed;
+}

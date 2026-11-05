@@ -38,6 +38,7 @@ import {
 } from "./progress";
 import { ChangesController, ChangesMessage } from "./changes";
 import { ArtifactsView, PlanArtifacts, PlanMessage, StageLike } from "./plan";
+import { SessionsController, SessionsMessage, SessionsView } from "./sessions";
 import { SseStream } from "./sseStream";
 import { currentFolder, neoSlug, normalizePath, projectForFolder, samePath } from "./workspace";
 
@@ -99,6 +100,8 @@ interface ViewState {
   live?: LiveView;
   // The Design and Plan documents and where each stands (src/plan.ts).
   artifacts?: ArtifactsView;
+  // Which NEO session is active, the earlier ones, and what happened while the user was away (src/sessions.ts).
+  sessions?: SessionsView;
   // Context the next message carries, and the one-click offer of the editor the user is in.
   attachments: AttachmentView[];
   suggestion: { kind: "file" | "selection"; label: string } | null;
@@ -169,12 +172,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private changes = new ChangesController((m) => this.post(m));
   // What NEO designed and plans to build (src/plan.ts): the documents before Execute.
   private artifacts = new PlanArtifacts();
+  // NEO's sessions, "since you were away", and the read-only session snapshots (src/sessions.ts).
+  private sessions: SessionsController;
 
   constructor(private readonly extensionUri: vscode.Uri, store?: vscode.Memento) {
     this.client = new NeoClient(serverUrl());
     // A plan read from disk arrives after the state that needed it; repaint when it does.
     this.plan = new PlanTracker(store, () => this.postState());
     this.state = this.blankState("connecting");
+    this.sessions = new SessionsController({
+      client: () => this.client,
+      store,
+      changed: () => this.postState(),
+      // "Seen" means on screen: the sidebar is visible and the window has focus.
+      viewed: () => Boolean(this.view?.visible) && (vscode.window.state?.focused ?? true),
+      projectName: () => this.state.project?.name,
+    });
     this.trackEditor(vscode.window.activeTextEditor);
     this.disposables.push(
       vscode.window.onDidChangeActiveTextEditor((e) => this.trackEditor(e)),
@@ -195,6 +208,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     view.onDidDispose(() => {
       this.view = undefined;
     });
+    // Showing the sidebar is when unseen activity becomes seen (src/sessions.ts).
+    view.onDidChangeVisibility?.(() => this.postState());
   }
 
   dispose(): void {
@@ -202,6 +217,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     if (this.editorTimer) clearTimeout(this.editorTimer);
     this.disposables.forEach((d) => d.dispose());
     this.changes.dispose();
+    this.sessions.dispose();
   }
 
   // --- workspace context ------------------------------------------------------------------
@@ -430,6 +446,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     await this.loadProject(picked.id, gen);
   }
 
+  /** NEO: Sessions — the project's sessions; one picked opens as a read-only snapshot. */
+  showSessions(): Promise<void> {
+    return this.sessions.pick();
+  }
+
   /** Whether the selected project is the one living in the open folder. */
   private folderIsSelectedProject(): boolean {
     const { project, folder } = this.state;
@@ -460,6 +481,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.state.mode = "project";
     this.state.project = { id: p.id, name: p.name, path: p.path, idea: p.idea ?? undefined };
     this.plan.start(p.id, p.path);
+    // Reads the last-seen anchor before anything below can mark this history as seen.
+    this.sessions.open(p.id, detail);
     // The plan gate may be far behind in the history (or gone from the window entirely). Every
     // gate in what was read is offered; only the plan's own document is kept.
     for (const ev of detail.history) {
@@ -525,6 +548,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.lastSeq = 0;
     this.transcript = [];
     this.plan.stop();
+    this.sessions.close();
     this.action.reset();
     this.notice = null;
     this.stopRequestedAt = 0;
@@ -570,6 +594,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     if (typeof ev.seq === "number") {
       if (ev.seq <= this.lastSeq) return;
       this.lastSeq = ev.seq;
+      this.sessions.noteEvent(ev);
     }
     this.applyEvent(ev);
     if (IGNORED_KINDS.has(ev.kind)) return;
@@ -708,6 +733,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     s.attentionReason = d.attention_reason ?? null;
     s.planProgress = d.plan_progress ?? null;
     this.artifacts.noteDetail(d);
+    this.sessions.noteDetail(d);
     // An open gate carries its document: the plan gate is where the task titles come from.
     if (s.gate) this.plan.noteGate(s.gate.phase, s.gate.artifact_path, s.gate.artifact, s.planProgress?.total);
     if (!s.busy) this.action.reset();
@@ -723,6 +749,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private async onMessage(m: Inbound): Promise<void> {
     if (m.type.startsWith("plan.")) {
       await this.artifacts.onMessage(m as unknown as PlanMessage);
+      return;
+    }
+    if (m.type.startsWith("sessions.")) {
+      await this.sessions.onMessage(m as unknown as SessionsMessage);
       return;
     }
     if (m.type.startsWith("changes.")) {
@@ -1048,6 +1078,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.settleStopping();
     // NEO's count - or, once Execute is over and NEO's has dropped, the furthest one remembered.
     const plan = this.plan.view(this.state.planProgress, this.state.phase, this.lastSeq);
+    // Before the state goes out: unseen activity on screen now is summarised, then marked seen.
+    if (this.state.mode === "project") this.sessions.sync(this.lastSeq, this.state, plan.progress);
+    this.state.sessions = this.state.mode === "project" ? this.sessions.view() : undefined;
     this.state.live = buildLive(
       { ...this.state, planProgress: plan.progress },
       plan.task,
@@ -1076,6 +1109,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <link rel="stylesheet" href="${media("progress.css")}">
 <link rel="stylesheet" href="${media("changes.css")}">
 <link rel="stylesheet" href="${media("plan.css")}">
+<link rel="stylesheet" href="${media("sessions.css")}">
 <title>NEO</title>
 </head>
 <body>
@@ -1135,6 +1169,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     </div>
   </section>
 
+  <!-- "Since you were away": what NEO stored after the user last saw this project. Owned by media/sessions.js. -->
+  <section id="away" class="card away hidden" aria-live="polite"></section>
+
   <main id="transcript" class="transcript" aria-live="polite"></main>
 
   <section id="changes" class="changes hidden" aria-label="Files NEO changed"></section>
@@ -1187,6 +1224,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <script nonce="${nonce}" src="${media("chat.js")}"></script>
 <script nonce="${nonce}" src="${media("changes.js")}"></script>
 <script nonce="${nonce}" src="${media("plan.js")}"></script>
+<script nonce="${nonce}" src="${media("sessions.js")}"></script>
 </body>
 </html>`;
   }

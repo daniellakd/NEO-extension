@@ -225,6 +225,14 @@
       view.maxSeq = ev.seq;
     }
     const t = $("transcript");
+    const before = t.lastElementChild;
+    drawEvent(ev, live, t);
+    // The event a new row came from: media/sessions.js places session and "new" markers by it.
+    const drawn = t.lastElementChild;
+    if (typeof ev.seq === "number" && drawn && drawn !== before && !drawn.dataset.seq) drawn.dataset.seq = String(ev.seq);
+  }
+
+  function drawEvent(ev, live, t) {
     switch (ev.kind) {
       case "user": {
         if (live) t.querySelectorAll(".msg.user.optimistic").forEach((n) => n.remove());
@@ -234,6 +242,7 @@
           break;
         }
         const wrap = el("div", "msg user");
+        if (ev.note) wrap.dataset.note = ev.note;      // NEO's own messages are drawn quieter (sessions.css)
         if (ev.note) wrap.appendChild(el("span", "note", ev.note));
         userContent(wrap, ev.text);
         t.appendChild(wrap);
