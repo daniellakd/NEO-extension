@@ -45,8 +45,14 @@ class NeoClient {
         const data = await this.request("GET", "/api/projects");
         return data.projects ?? [];
     }
-    project(id, history) {
-        return this.request("GET", `/api/projects/${enc(id)}?history=${history}`);
+    /** `session` reads an earlier session's history; it never changes which session is active. */
+    project(id, history, session) {
+        const scope = session ? `&session=${enc(session)}` : "";
+        return this.request("GET", `/api/projects/${enc(id)}?history=${history}${scope}`);
+    }
+    async sessions(id) {
+        const data = await this.request("GET", `/api/projects/${enc(id)}/sessions`);
+        return { sessions: data.sessions ?? [], kinds: data.kinds ?? {} };
     }
     createProject(body) {
         return this.request("POST", "/api/projects", body);

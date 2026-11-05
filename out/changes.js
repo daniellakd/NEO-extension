@@ -24,6 +24,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ChangesController = void 0;
+exports.worktrees = worktrees;
 exports.computeChanges = computeChanges;
 const child_process_1 = require("child_process");
 const path = __importStar(require("path"));

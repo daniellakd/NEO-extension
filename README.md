@@ -57,7 +57,7 @@ The sidebar shows **Connected** when NEO is reachable. If it is not, start NEO a
   and **Web UI** (opens the NEO web UI on the current project).
 
 Commands are also available from the Command Palette: `NEO: Connect`, `NEO: Refresh`,
-`NEO: New Project`, `NEO: Projects` and `NEO: Open in Browser`.
+`NEO: New Project`, `NEO: Projects`, `NEO: Sessions` and `NEO: Open in Browser`.
 
 ## Adding context to a message
 
@@ -118,6 +118,34 @@ design's sections or the plan's tasks.
 
 Which documents are shown comes from NEO's own stage list: the gates with a document, up to the
 plan's. The Review gate is not affected.
+
+## Sessions and picking up where you left off
+
+A NEO project is worked on in **sessions**: building it is one, a change asked for afterwards (from
+the NEO web UI) is another. The sidebar shows the session NEO is working in now, the **active**
+session.
+
+- **At the top of the chat:** a line names the session the chat shows (**Current session** · title
+  · type · when it started). When NEO has more of it than the sidebar loads, it says how many
+  earlier events are not shown, with **Open the full session**. A session that starts while the
+  sidebar is open gets its own separator in the chat.
+- **NEO: Sessions** (the history icon in the view title, or the Command Palette) lists every session
+  of the project, newest first: its type, whether it is active or ended, when it started and what was
+  asked. Picking one opens it as a **read-only** Markdown preview: the request, dates, gate
+  decisions and the stored history. Viewing a session never makes it active, never restarts work
+  and never changes the project; to act, use the sidebar.
+- **Since you were away:** the sidebar remembers, per project, the last NEO event you actually had
+  on screen (sidebar visible, VS Code focused). When you come back, after reopening VS Code or
+  returning to the window, a card lists what NEO stored after it: phases entered, gates reached,
+  gate decisions (with the time NEO recorded), questions, messages, stalls, errors, plan steps
+  ticked, and sessions started or ended. It also says where things stand now. A **New since your
+  last visit** line marks the spot in the chat.
+
+  The card only reports what NEO stored. Stream events carry no time, so no time is given for them.
+  If NEO holds more events than can be read, the card says its counts are minimums. The first time
+  a project is opened there is no record of a last visit, and the card says that instead of guessing.
+  NEO's own automatic messages (auto-continue, repair, approval…) are drawn quieter in the chat than
+  yours.
 
 ## Existing project or new project
 

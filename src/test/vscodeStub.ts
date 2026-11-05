@@ -6,6 +6,7 @@ import * as path from "path";
 
 class Uri {
   readonly path: string;
+  query = "";
   constructor(readonly fsPath: string, readonly scheme = "file") {
     this.path = fsPath.split(path.sep).join("/");
   }
@@ -18,8 +19,10 @@ class Uri {
   static parse(s: string): Uri {
     return new Uri(s, s.split(":")[0]);
   }
-  static from(c: { scheme?: string; path?: string }): Uri {
-    return new Uri(c.path ?? "", c.scheme ?? "file");
+  static from(c: { scheme?: string; path?: string; query?: string }): Uri {
+    const u = new Uri(c.path ?? "", c.scheme ?? "file");
+    u.query = c.query ?? "";
+    return u;
   }
   with(): Uri {
     return this;
@@ -37,7 +40,11 @@ export const stubState: {
   folders: string[];
   serverUrl: string;
   quickPick: ((items: { id?: string }[]) => unknown) | null;
-} = { folders: [], serverUrl: "http://127.0.0.1:0", quickPick: null };
+  /** Every executeCommand call, in order. */
+  commands: { id: string; args: unknown[] }[];
+  /** Whether the VS Code window has focus. */
+  focused: boolean;
+} = { folders: [], serverUrl: "http://127.0.0.1:0", quickPick: null, commands: [], focused: true };
 
 const vscode = {
   Uri,
@@ -54,6 +61,10 @@ const vscode = {
     activeTextEditor: undefined,
     onDidChangeActiveTextEditor: event(),
     onDidChangeTextEditorSelection: event(),
+    get state() {
+      return { focused: stubState.focused };
+    },
+    onDidChangeWindowState: event(),
     showInformationMessage: async () => undefined,
     showWarningMessage: async () => undefined,
     showErrorMessage: async () => undefined,
@@ -82,7 +93,13 @@ const vscode = {
         fs.readdirSync(u.fsPath, { withFileTypes: true }).map((d) => [d.name, d.isDirectory() ? 2 : 1]),
     },
   },
-  commands: { registerCommand: disposable, executeCommand: async () => undefined },
+  commands: {
+    registerCommand: disposable,
+    executeCommand: async (id: string, ...args: unknown[]) => {
+      stubState.commands.push({ id, args });
+      return undefined;
+    },
+  },
   env: { openExternal: async () => true },
 };
 

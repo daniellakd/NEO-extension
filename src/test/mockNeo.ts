@@ -16,6 +16,9 @@ export interface MockProject {
   attention_reason: string | null;
   plan_progress: { done: number; total: number } | null;
   history: Record<string, unknown>[];
+  /** NEO work sessions, oldest first. Unset: a NEO without sessions (the detail has no `sessions`). */
+  sessions?: Record<string, unknown>[];
+  gate_events?: Record<string, unknown>[];
 }
 
 export class MockNeo {
@@ -23,6 +26,8 @@ export class MockNeo {
   readonly calls: string[] = [];
   readonly maxStreams = new Map<string, number>();
   refuseStreams = false;
+  /** Holds a project read until it resolves (tests that need a read still in flight). */
+  holdRead: ((history: number) => Promise<void> | undefined) | null = null;
   private readonly streams = new Map<string, Set<http.ServerResponse>>();
   private seq = 1000;
   private readonly server = http.createServer((req, res) => this.handle(req, res));
@@ -57,9 +62,29 @@ export class MockNeo {
 
   /** Persisted while nobody is listening: only a catch-up can deliver it. */
   record(id: string, ev: Record<string, unknown>): Record<string, unknown> {
+    const p = this.projects.get(id)!;
     const e = { ...ev, seq: ++this.seq };
-    this.projects.get(id)!.history.push(e);
+    p.history.push(e);
+    // Filed under the newest session, as NEO's append_stream_event does with work_session_id.
+    const current = p.sessions?.[p.sessions.length - 1];
+    if (current) {
+      if (current.first_event === null || current.first_event === undefined) current.first_event = e.seq;
+      current.last_event = e.seq;
+      (e as Record<string, unknown>).__session = current.id;
+    }
     return e;
+  }
+
+  /** A new session, as POST /sessions makes one: the previous one ends. */
+  startSession(id: string, s: { id: string; kind?: string; title?: string; request?: string; created_at?: number }): Record<string, unknown> {
+    const p = this.projects.get(id)!;
+    p.sessions ??= [];
+    const now = Date.now() / 1000;
+    const last = p.sessions[p.sessions.length - 1];
+    if (last && !last.ended_at) last.ended_at = s.created_at ?? now;
+    const session = { kind: "full", title: s.id, request: null, created_at: now, ended_at: null, first_event: null, last_event: null, messages: 0, ...s };
+    p.sessions.push(session);
+    return session;
   }
 
   /** A live-only event, like NEO's `persist=False` emits (the status after an abort): no seq, no history. */
@@ -80,13 +105,22 @@ export class MockNeo {
     for (const r of this.streams.get(id) ?? []) r.write(`data: ${JSON.stringify(ev)}\n\n`);
   }
 
-  private detail(p: MockProject, history: number): Record<string, unknown> {
+  private detail(p: MockProject, history: number, session?: string): Record<string, unknown> {
+    // NEO's stream_tail: one session's events (the newest also adopts untagged ones), capped at 2000.
+    const newest = p.sessions?.[p.sessions.length - 1]?.id as string | undefined;
+    const chosen = session ?? newest;
+    const events = p.sessions
+      ? p.history.filter((e) => e.__session === chosen || (chosen === newest && e.__session === undefined))
+      : p.history;
+    const limit = Math.max(1, Math.min(history, 2000));
+    const shown = events.slice(-limit).map(({ __session, ...e }) => e);
     return {
       project: { id: p.id, name: p.name, path: p.path, phase: p.phase, entry_type: "new", idea: "A todo CLI" },
-      phase: p.phase, at_gate: p.at_gate, session_id: "ses", gate: p.gate, busy: p.busy, awaiting_answer: p.awaiting_answer,
+      phase: p.phase, at_gate: p.at_gate, session_id: p.sessions ? chosen ?? null : "ses", gate: p.gate, busy: p.busy, awaiting_answer: p.awaiting_answer,
       pending_request: p.pending_request, needs_attention: p.needs_attention, attention_reason: p.attention_reason,
       plan_progress: p.plan_progress, stages: [], path_missing: false,
-      history: history > 0 ? p.history.slice(-history) : [], history_total: p.history.length, history_shown: Math.min(history, p.history.length),
+      history: shown, history_total: events.length, history_shown: shown.length,
+      ...(p.sessions ? { sessions: p.sessions.map((s) => ({ ...s })), gate_events: p.gate_events ?? [] } : {}),
     };
   }
 
@@ -96,7 +130,7 @@ export class MockNeo {
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     };
-    this.calls.push(`${req.method} ${url.pathname}`);
+    this.calls.push(`${req.method} ${url.pathname}${url.search}`);
     if (url.pathname === "/api/debug/status") return json(200, { opencode_reachable: true });
     if (url.pathname === "/api/projects" && req.method === "GET") {
       return json(200, { projects: [...this.projects.values()].map((p) => ({ id: p.id, name: p.name, path: p.path, phase: p.phase, entry_type: "new" })) });
@@ -105,7 +139,21 @@ export class MockNeo {
     const p = m ? this.projects.get(m[1]) : undefined;
     if (!m || !p) return json(404, { detail: "not found" });
     const sub = m[2] ?? "";
-    if (sub === "" && req.method === "GET") return json(200, this.detail(p, Number(url.searchParams.get("history") ?? 0)));
+    if (sub === "" && req.method === "GET") {
+      const session = url.searchParams.get("session") ?? undefined;
+      if (session && !p.sessions?.some((s) => s.id === session)) return json(404, { detail: "no such session in this project" });
+      const history = Number(url.searchParams.get("history") ?? 0);
+      const held = this.holdRead?.(history);
+      if (held) {
+        void held.then(() => json(200, this.detail(p, history, session)));
+        return;
+      }
+      return json(200, this.detail(p, history, session));
+    }
+    if (sub === "/sessions" && req.method === "GET") {
+      if (!p.sessions) return json(404, { detail: "not found" });
+      return json(200, { sessions: p.sessions, kinds: { full: { label: "Full pipeline" }, prd: { label: "Quick plan" }, quick: { label: "Quick change" } } });
+    }
     if (sub === "/stream") {
       if (this.refuseStreams) return json(503, { detail: "down" });
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
