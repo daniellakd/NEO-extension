@@ -99,6 +99,26 @@ The extension reads git itself (NEO's own `/diff` compares the project root, whi
 while the work happens in `.worktrees/`). It only runs reading commands and never writes to the
 project or the worktree. `git` must be on `PATH`.
 
+## Design and Plan
+
+Under the pipeline row, a small chip for each document NEO writes before Execute shows where it
+stands: **Design · approved**, **Plan · awaiting your approval**, **Plan · task 3 of 8**. Hover a
+chip for its history (ready, changes requested, approved, with times); click it to unfold the
+design's sections or the plan's tasks.
+
+- **At the Design and Plan gates:** the gate card starts with what you are approving - the design's
+  sections, or the plan's tasks with their step counts - and changes requested last time, if any.
+  The full document is folded below it.
+- **During Execute:** the plan's tasks are marked ✓ done, → current and ○ to do. This is the same
+  state as the progress line above, so the two always agree.
+- **Preview** opens the real `docs/neoag/design.md` or `plan.md` as a read-only Markdown preview
+  (during Execute, the worktree's copy, where the plan is ticked). **Open file** opens it in the
+  editor. To change a document, use **Request Changes** at its gate, so NEO stays the source of
+  truth.
+
+Which documents are shown comes from NEO's own stage list: the gates with a document, up to the
+plan's. The Review gate is not affected.
+
 ## Existing project or new project
 
 **Existing project:** if the open folder is already a NEO project, the sidebar selects it
