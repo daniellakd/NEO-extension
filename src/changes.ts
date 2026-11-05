@@ -96,7 +96,7 @@ interface Worktree {
   branch: string | null;
 }
 
-async function worktrees(projectPath: string): Promise<{ root: Worktree | null; work: Worktree | null }> {
+export async function worktrees(projectPath: string): Promise<{ root: Worktree | null; work: Worktree | null }> {
   const out = await git(projectPath, ["worktree", "list", "--porcelain"]);
   const list: Worktree[] = [];
   for (const line of out.split(/\r?\n/)) {

@@ -37,6 +37,7 @@ import {
   touchesPlan,
 } from "./progress";
 import { ChangesController, ChangesMessage } from "./changes";
+import { ArtifactsView, PlanArtifacts, PlanMessage, StageLike } from "./plan";
 import { SseStream } from "./sseStream";
 import { currentFolder, neoSlug, normalizePath, projectForFolder, samePath } from "./workspace";
 
@@ -96,6 +97,8 @@ interface ViewState {
   streamRetryAt?: number;
   catchingUp: boolean;
   live?: LiveView;
+  // The Design and Plan documents and where each stands (src/plan.ts).
+  artifacts?: ArtifactsView;
   // Context the next message carries, and the one-click offer of the editor the user is in.
   attachments: AttachmentView[];
   suggestion: { kind: "file" | "selection"; label: string } | null;
@@ -164,6 +167,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private disposables: vscode.Disposable[] = [];
   // What NEO produced (src/changes.ts): the changed files and their diffs.
   private changes = new ChangesController((m) => this.post(m));
+  // What NEO designed and plans to build (src/plan.ts): the documents before Execute.
+  private artifacts = new PlanArtifacts();
 
   constructor(private readonly extensionUri: vscode.Uri, store?: vscode.Memento) {
     this.client = new NeoClient(serverUrl());
@@ -702,6 +707,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     s.needsAttention = Boolean(d.needs_attention);
     s.attentionReason = d.attention_reason ?? null;
     s.planProgress = d.plan_progress ?? null;
+    this.artifacts.noteDetail(d);
     // An open gate carries its document: the plan gate is where the task titles come from.
     if (s.gate) this.plan.noteGate(s.gate.phase, s.gate.artifact_path, s.gate.artifact, s.planProgress?.total);
     if (!s.busy) this.action.reset();
@@ -715,6 +721,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   // --- webview actions --------------------------------------------------------------------
 
   private async onMessage(m: Inbound): Promise<void> {
+    if (m.type.startsWith("plan.")) {
+      await this.artifacts.onMessage(m as unknown as PlanMessage);
+      return;
+    }
     if (m.type.startsWith("changes.")) {
       await this.changes.onMessage(m as unknown as ChangesMessage);
       return;
@@ -1045,6 +1055,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       liveNotice(this.notice, this.state.busy),
     );
     this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
+    this.state.artifacts = this.artifacts.build({ ...this.state, stages: this.state.stages as StageLike[] });
     this.post({ type: "state", state: this.state });
   }
 
@@ -1064,6 +1075,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <link rel="stylesheet" href="${media("chat.css")}">
 <link rel="stylesheet" href="${media("progress.css")}">
 <link rel="stylesheet" href="${media("changes.css")}">
+<link rel="stylesheet" href="${media("plan.css")}">
 <title>NEO</title>
 </head>
 <body>
@@ -1095,6 +1107,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     <!-- Live progress: current plan task, plan progress, current action, and the one line that
          says whether NEO is stalled, stopped or reconnecting. Owned by media/progress.js. -->
     <div id="live" class="live hidden" aria-live="polite"></div>
+    <!-- The Design and Plan documents and where each stands. Owned by media/plan.js. -->
+    <div id="artifacts" class="artifacts hidden"></div>
   </header>
 
   <section id="banner" class="banner hidden"></section>
@@ -1131,6 +1145,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       <strong id="gate-title"></strong>
     </div>
     <div class="muted small">phase <code id="gate-phase"></code> · <code id="gate-path"></code></div>
+    <div id="gate-artifact" class="gate-artifact hidden"></div>
     <details id="gate-doc" class="gate-doc">
       <summary id="gate-doc-summary">document</summary>
       <div id="gate-doc-body" class="md"></div>
@@ -1171,6 +1186,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <script nonce="${nonce}" src="${media("progress.js")}"></script>
 <script nonce="${nonce}" src="${media("chat.js")}"></script>
 <script nonce="${nonce}" src="${media("changes.js")}"></script>
+<script nonce="${nonce}" src="${media("plan.js")}"></script>
 </body>
 </html>`;
   }

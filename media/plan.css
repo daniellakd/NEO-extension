@@ -1,0 +1,128 @@
+/* The Design and Plan documents (#artifacts, #gate-artifact). Owned by media/plan.js. Theme
+   variables only, as in chat.css; the custom properties used here (--border, --muted, --pass,
+   --warn, --accent, --code-bg, --hover-bg, --radius, --radius-lg) are defined there. */
+
+.artifacts { margin-top: 6px; font-size: 0.85em; }
+
+.art-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+button.art-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 1px 8px 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--vscode-foreground);
+  font-size: 1em;
+  line-height: 1.6;
+}
+button.art-chip:hover { background: var(--hover-bg); }
+button.art-chip[aria-expanded="true"] { border-color: var(--vscode-focusBorder); }
+button.art-chip:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+
+/* A small page for a design, a small checklist for a plan: drawn, not icon fonts. */
+.art-icon {
+  flex: none;
+  width: 8px;
+  height: 10px;
+  border: 1px solid currentColor;
+  border-radius: 1px;
+  opacity: 0.75;
+}
+.art-chip.plan .art-icon {
+  border-width: 0;
+  background:
+    linear-gradient(currentColor, currentColor) 0 1px / 8px 1px no-repeat,
+    linear-gradient(currentColor, currentColor) 0 4.5px / 8px 1px no-repeat,
+    linear-gradient(currentColor, currentColor) 0 8px / 8px 1px no-repeat;
+}
+.art-label { font-weight: 600; flex: none; }
+.art-status { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.art-chip.s-approved .art-status::before { content: "✓ "; color: var(--pass); }
+.art-chip.s-changes .art-status { color: var(--warn); }
+.art-chip.s-gate { border-color: var(--warn); }
+.art-chip.s-gate .art-status { color: var(--warn); }
+.art-chip.s-drafting .art-status { font-style: italic; }
+
+/* An unfolded chip, and the gate card's summary. */
+.art-panel {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--vscode-editorWidget-background, transparent);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.art-doc-title { font-weight: 600; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.art-tasks, .art-sections { margin: 2px 0 4px; padding: 0; list-style: none; }
+.art-task {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 0;
+}
+.art-mark { flex: none; width: 12px; text-align: center; color: var(--muted); }
+.art-task.done .art-mark { color: var(--pass); }
+.art-task.done .art-task-title { color: var(--muted); }
+.art-task.current .art-mark { color: var(--accent); font-weight: 700; }
+.art-task.current .art-task-title { font-weight: 600; }
+.art-task-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-steps { flex: none; color: var(--muted); font-size: 0.9em; }
+.art-sections li {
+  padding: 1px 0 1px 12px;
+  position: relative;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.art-sections li::before { content: "·"; position: absolute; left: 3px; color: var(--muted); }
+
+.art-note { color: var(--muted); font-size: 0.92em; padding: 2px 0; }
+.art-feedback {
+  margin: 2px 0 6px;
+  padding: 3px 8px;
+  border-left: 3px solid var(--warn);
+  background: var(--code-bg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 6.5em;
+  overflow-y: auto;
+}
+.art-feedback-label { color: var(--muted); }
+
+.art-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+/* Preview is the review action; the editor is there, but quieter. */
+button.art-preview {
+  padding: 2px 10px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border-radius: var(--radius);
+  font-size: 1em;
+}
+button.art-preview:hover { background: var(--vscode-button-secondaryHoverBackground); }
+button.art-source, button.art-more {
+  padding: 0;
+  background: transparent;
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.95em;
+}
+button.art-source:hover, button.art-more:hover { text-decoration: underline; }
+button.art-more { margin: 2px 0 0 18px; }
+
+/* Inside the Design and Plan gate cards, above the raw document. */
+.gate-artifact {
+  margin: 8px 0 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.92em;
+}
+.art-gate-head { display: flex; align-items: baseline; gap: 8px; }
+.art-size { color: var(--muted); }
+.art-ask { color: var(--muted); font-size: 0.92em; margin: 2px 0 6px; }
