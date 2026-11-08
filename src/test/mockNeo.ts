@@ -37,6 +37,10 @@ export class MockNeo {
   readonly posts: { path: string; body: Record<string, unknown> }[] = [];
   readonly maxStreams = new Map<string, number>();
   refuseStreams = false;
+  /** NEO "goes away": every request, streams included, gets its connection cut with no answer. */
+  offline = false;
+  /** The answer to POST /api/projects: a refusal NEO's create_project raises, or a project made. */
+  createAnswer: { status: number; body: unknown } | null = null;
   /** Holds a project read until it resolves (tests that need a read still in flight). */
   holdRead: ((history: number) => Promise<void> | undefined) | null = null;
   private readonly streams = new Map<string, Set<http.ServerResponse>>();
@@ -148,7 +152,17 @@ export class MockNeo {
       res.end(JSON.stringify(body));
     };
     this.calls.push(`${req.method} ${url.pathname}${url.search}`);
+    if (this.offline) {
+      req.socket.destroy();
+      return;
+    }
     if (url.pathname === "/api/debug/status") return json(200, { opencode_reachable: true });
+    if (url.pathname === "/api/projects" && req.method === "POST") {
+      const answer = this.createAnswer ?? { status: 422, body: { detail: "not mocked" } };
+      req.resume();
+      req.on("end", () => json(answer.status, answer.body));
+      return;
+    }
     if (url.pathname === "/api/projects" && req.method === "GET") {
       return json(200, { projects: [...this.projects.values()].map((p) => ({ id: p.id, name: p.name, path: p.path, phase: p.phase, entry_type: "new" })) });
     }

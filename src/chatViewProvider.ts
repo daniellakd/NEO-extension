@@ -42,6 +42,7 @@ import { ArtifactView, ArtifactsView, PlanArtifacts, PlanMessage, StageLike } fr
 import { kindLabel, sessionStateLabel } from "./sessionHistory";
 import { SessionsController, SessionsMessage, SessionsView } from "./sessions";
 import { SseStream } from "./sseStream";
+import { ErrorAction, ErrorView, OPEN_SETTINGS, describeError, logError, notifyError, openSettings } from "./errors";
 import { currentFolder, neoSlug, normalizePath, projectForFolder, samePath } from "./workspace";
 
 /**
@@ -68,11 +69,14 @@ const IGNORED_KINDS = new Set(["hello", "usage", "reasoning", "permission", "sig
 const STOP_SETTLE_MS = 30_000;
 // NEO's POST /sessions takes a request of at most this many characters (app.py SessionIn).
 const SESSION_REQUEST_MAX = 20_000;
+// Consecutive failed reads of an open project before "Reconnecting…" becomes "NEO is offline". The
+// reads keep going either way (the 10-second resync and the stream's own backoff).
+const OFFLINE_AFTER = 3;
 const DONE_REFUSAL =
   "This session is complete, so the message was not sent into it. Press Send again to start a new " +
   "session with it - the completed one stays as read-only history.";
 
-type Connection = "connecting" | "connected" | "unreachable";
+type Connection = "connecting" | "connected" | "reconnecting" | "unreachable";
 
 /**
  * Context keys for the view title's state-dependent actions (package.json `when` clauses). Only the
@@ -86,12 +90,34 @@ export interface NeoContextKeys {
   /** Its current session reached Done, so a new session can start. */
   "neo.sessionDone": boolean;
 }
+
+/** An error as the webview shows it: the summary, what to do, and the technical detail behind a toggle. */
+interface Problem {
+  summary: string;
+  hint?: string;
+  detail?: string;
+  /** The server URL setting is the likely cause: offer the settings first. */
+  config?: boolean;
+}
 type Mode = "loading" | "noFolder" | "noProject" | "project";
 
 interface ViewState {
   serverHost: string;
+  /** The configured `neo.serverUrl`, as the user wrote it (normalised). */
+  serverUrl: string;
   connection: Connection;
-  connectionError?: string;
+  /** Why NEO is not reachable, while it is not. */
+  offline?: Problem;
+  /** A failed read with nothing on screen to keep (no project): shown in the empty state with Retry. */
+  problem?: Problem;
+  /** An explicit Retry is in flight. */
+  retrying: boolean;
+  /**
+   * NEO is confirmed reachable: connected, and the live stream not dropped. Exactly when the header
+   * says "Connected". Actions that change NEO's state (send, new session, answer, gate,
+   * stop) are enabled only then; the draft and the attached context are untouched either way.
+   */
+  ready: boolean;
   runtimeReachable?: boolean;
   stream: "off" | "up" | "reconnecting";
   folder?: string;
@@ -134,6 +160,9 @@ type ContextSource = "menu" | "suggested" | "at" | "file" | "selection";
 type Inbound =
   | { type: "ready" }
   | { type: "connect" }
+  | { type: "retry" }
+  | { type: "openSettings" }
+  | { type: "pickFolder" }
   | { type: "refresh" }
   | { type: "createProject"; name: string; idea: string; interaction: string }
   | { type: "send"; text: string }
@@ -173,6 +202,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private resyncSeq = 0;
   private resyncApplied = 0;
   private resyncing = false;
+  // Consecutive failed reads; see OFFLINE_AFTER. And, with no project open, the slow check for NEO
+  // coming up, so a first run connects on its own once the server is started.
+  private failures = 0;
+  private offlineTimer: NodeJS.Timeout | undefined;
+  // A reload of the open project failed, so it has no stream: the next good read reloads it.
+  private orphaned = false;
 
   // Attached context lives here, not in the webview: a selection is a snapshot only the host can
   // take, and the chips survive the webview reloading.
@@ -238,6 +273,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   }
 
   dispose(): void {
+    this.stopOfflinePoll();
     this.stopProject();
     if (this.editorTimer) clearTimeout(this.editorTimer);
     this.disposables.forEach((d) => d.dispose());
@@ -342,11 +378,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.attachments = [];
   }
 
-  /** NEO: Connect — also what a changed setting or workspace leads to. */
+  /**
+   * Start over: a changed setting or workspace leads here, and so does Retry when no project is
+   * open. Everything is read again from NEO; attached context was gathered for the old state.
+   */
   async connect(): Promise<void> {
     this.client = new NeoClient(serverUrl());
+    this.stopOfflinePoll();
     this.stopProject();
     this.clearContext();
+    this.failures = 0;
     const gen = ++this.generation;
     const folder = currentFolder();
     this.state = {
@@ -361,10 +402,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       runtimeReachable = Boolean((await this.client.status()).opencode_reachable);
     } catch (err) {
       if (gen !== this.generation) return;
-      this.state.connection = "unreachable";
-      this.state.connectionError = errorText(err);
       this.state.mode = folder ? "noProject" : "noFolder";
-      this.postState();
+      this.fail(err, "connect");
       return;
     }
     if (gen !== this.generation) return;
@@ -387,13 +426,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       }
     } catch (err) {
       if (gen !== this.generation) return;
-      this.fail(err);
+      this.state.mode = "noProject";
+      this.fail(err, "listProjects");
     }
+  }
+
+  /**
+   * NEO: Connect, and every Retry button. With a project on screen it stays there: the same project
+   * is read again and its stream reopened, and the draft, the attached context and the header are
+   * kept. Without one, this is `connect()`. Only reads are repeated; nothing is sent to NEO.
+   */
+  async retry(): Promise<void> {
+    const project = this.state.project;
+    if (!project || this.state.mode !== "project") return this.connect();
+    if (this.state.retrying) return;
+    this.state.retrying = true;
+    this.postState();
+    try {
+      // NEO first: a down server leaves the stream and the resync running as they are.
+      this.state.runtimeReachable = Boolean((await this.client.status()).opencode_reachable);
+    } catch (err) {
+      this.state.retrying = false;
+      this.noteDown(err, true);
+      return;
+    }
+    this.state.retrying = false;
+    if (project !== this.state.project) return;           // switched away meanwhile
+    this.noteUp();
+    const gen = ++this.generation;
+    this.stopProject();
+    await this.loadProject(project.id, gen);
   }
 
   /** NEO: Refresh — re-read everything for the current project, or reconnect if there is none. */
   async refresh(): Promise<void> {
-    if (this.state.project && this.state.connection === "connected") {
+    if (this.state.project && this.state.mode === "project") {
+      if (this.state.connection !== "connected") return this.retry();
       const gen = ++this.generation;
       this.stopProject();
       await this.loadProject(this.state.project.id, gen);
@@ -402,8 +470,51 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     }
   }
 
+  /**
+   * An action that needs NEO, asked for while it is not reachable (the title bar and the Command
+   * Palette stay enabled): say why it cannot run, and offer what can fix it.
+   */
+  private async explainOffline(what: string): Promise<void> {
+    const text = this.state.connection === "unreachable"
+      ? `NEO is offline. ${what} needs the NEO server at ${this.client.baseUrl}. Start NEO, then Retry.`
+      : `NEO is reconnecting. ${what} needs a confirmed connection to ${this.client.baseUrl}; try again once the sidebar says Connected.`;
+    const picked = await vscode.window.showWarningMessage(
+      text,
+      "Retry",
+      OPEN_SETTINGS,
+    );
+    if (picked === "Retry") await this.retry();
+    else if (picked === OPEN_SETTINGS) await openSettings();
+  }
+
+  /** See ViewState.ready. */
+  private isReady(): boolean {
+    const s = this.state;
+    // The header's own rule for "Connected" (media/chat.js): a dropped stream reads "Reconnecting…".
+    return s.connection === "connected" && s.stream !== "reconnecting";
+  }
+
+  /**
+   * A change to NEO's state asked for while the connection is not confirmed (the webview disables
+   * these, so this is the backstop): nothing is sent. Returns true when the action may go ahead.
+   */
+  private confirmReady(): boolean {
+    if (this.isReady()) return true;
+    void this.explainOffline("This action");
+    return false;
+  }
+
+  /** NEO has stopped answering (not merely still being connected to). */
+  private offlineNow(): boolean {
+    return this.state.connection === "unreachable" || this.state.connection === "reconnecting";
+  }
+
   /** NEO: New Project — show the form. */
   showNewProject(): void {
+    if (this.offlineNow()) {
+      void this.explainOffline("Creating a project");
+      return;
+    }
     const folder = this.state.folder;
     this.post({
       type: "showNewProject",
@@ -419,16 +530,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
    * stream. Nothing is sent to it, so switching never starts work or a session.
    */
   async switchProject(): Promise<void> {
+    if (this.offlineNow()) {
+      void this.explainOffline("The project list");
+      return;
+    }
     let projects;
     try {
       projects = await this.client.listProjects();
     } catch (err) {
-      if (err instanceof NeoUnreachable) {
-        this.state.connection = "unreachable";
-        this.state.connectionError = err.message;
-        this.postState();
-      }
-      void vscode.window.showErrorMessage(`NEO: ${errorText(err)}`);
+      const shown = describeError(err, "listProjects");
+      if (shown.offline) this.wentOffline(err, shown);
+      // Listing is a read: retrying it is safe.
+      void notifyError(shown, () => this.switchProject());
       return;
     }
     if (!projects.length) {
@@ -483,6 +596,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   }
 
   openInBrowser(): void {
+    // The Web UI is served by the NEO server itself: offline, the browser would open on nothing.
+    if (this.offlineNow()) {
+      void this.explainOffline("The NEO Web UI");
+      return;
+    }
     const id = this.state.project?.id;
     const url = this.client.baseUrl + (id ? `/?project=${encodeURIComponent(id)}` : "/");
     void vscode.env.openExternal(vscode.Uri.parse(url));
@@ -642,13 +760,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   // --- project lifecycle ------------------------------------------------------------------
 
   private async loadProject(id: string, gen: number): Promise<void> {
-    this.state.mode = "loading";
-    this.postState();
+    // Reloading the project on screen (Refresh, Retry, a new session) keeps it on screen meanwhile.
+    const reload = this.state.mode === "project" && this.state.project?.id === id;
+    this.orphaned = false;
+    if (!reload) {
+      this.state.mode = "loading";
+      this.postState();
+    }
     let detail: ProjectDetail;
     try {
       detail = await this.client.project(id, HISTORY);
     } catch (err) {
-      if (gen === this.generation) this.fail(err);
+      if (gen !== this.generation) return;
+      if (this.state.project?.id === id) {
+        // It stays on screen, and the 10-second read keeps trying: when NEO answers again the
+        // project is reloaded from there (see resync), with no Retry needed.
+        this.state.mode = "project";
+        this.orphaned = true;
+        this.resyncTimer ??= setInterval(() => void this.resync(), RESYNC_MS);
+      }
+      this.fail(err, reload ? "refresh" : "loadProject");
       return;
     }
     if (gen !== this.generation) return;
@@ -682,7 +813,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         if (gen !== this.generation) return;
         this.state.stream = "up";
         this.state.streamRetryAt = undefined;
-        this.state.connection = "connected";
+        this.noteUp();
         // Say so while the gap is being filled, so a reconnect is visibly finished rather than
         // just silently no longer broken.
         if (reconnect) this.state.catchingUp = true;
@@ -881,19 +1012,85 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       const detail = await this.client.project(project.id, 1);
       if (gen !== this.generation || seq < this.resyncApplied) return;
       this.resyncApplied = seq;
-      this.state.connection = "connected";
+      this.noteUp();
+      if (this.orphaned) {
+        // A reload failed while NEO was down, so this project has no stream: reload it now.
+        this.resyncing = false;
+        const next = ++this.generation;
+        this.stopProject();
+        await this.loadProject(project.id, next);
+        return;
+      }
       this.applyDetail(detail);
       this.postState();
     } catch (err) {
       if (gen !== this.generation) return;
-      if (err instanceof NeoUnreachable) {
-        this.state.connection = "unreachable";
-        this.state.connectionError = err.message;
-        this.postState();
-      }
+      if (err instanceof NeoUnreachable) this.noteDown(err);
     } finally {
       this.resyncing = false;
     }
+  }
+
+  /**
+   * A read of the open project failed to reach NEO. The project, transcript, draft and attached
+   * context all stay; the first failures say "Reconnecting…", and after OFFLINE_AFTER in a row (or
+   * an explicit Retry that failed) the sidebar says NEO is offline. The reads go on regardless.
+   */
+  private noteDown(err: unknown, hard = false): void {
+    this.failures += 1;
+    const shown = describeError(err, "connect");
+    if (this.state.connection === "connected" || hard) logError(shown);
+    this.state.offline = problemOf(shown);
+    this.state.connection = hard || this.failures >= OFFLINE_AFTER ? "unreachable" : "reconnecting";
+    this.postState();
+  }
+
+  /** NEO answered. After a loss of connection, say it is back. */
+  private noteUp(): void {
+    const was = this.state.connection;
+    this.failures = 0;
+    this.state.offline = undefined;
+    this.state.connection = "connected";
+    if (was === "reconnecting" || was === "unreachable") {
+      this.post({ type: "toast", level: "ok", text: "Reconnected to NEO" });
+    }
+  }
+
+  /** NEO could not be reached with no project open: the offline empty state, and a slow check. */
+  private wentOffline(err: unknown, shown = describeError(err, "connect")): void {
+    if (this.state.project && this.state.mode === "project") {
+      this.noteDown(err);
+      return;
+    }
+    logError(shown);
+    this.state.connection = "unreachable";
+    this.state.offline = problemOf(shown);
+    this.state.problem = undefined;
+    this.postState();
+    this.pollOffline();
+  }
+
+  /** Checks for NEO every 10 seconds while it is offline and no project is open; connects once it answers. */
+  private pollOffline(): void {
+    if (this.offlineTimer) return;
+    const gen = this.generation;
+    this.offlineTimer = setInterval(async () => {
+      if (gen !== this.generation || this.state.connection !== "unreachable") return this.stopOfflinePoll();
+      try {
+        await this.client.status();
+      } catch {
+        return;
+      }
+      if (gen !== this.generation) return;
+      this.stopOfflinePoll();
+      void this.connect();
+    }, RESYNC_MS);
+    this.offlineTimer.unref?.();
+  }
+
+  private stopOfflinePoll(): void {
+    if (this.offlineTimer) clearInterval(this.offlineTimer);
+    this.offlineTimer = undefined;
   }
 
   private applyDetail(d: ProjectDetail): void {
@@ -941,7 +1138,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         if (this.state.project) this.post({ type: "history", events: this.transcript });
         return;
       case "connect":
-        return this.connect();
+      case "retry":
+        return this.retry();
+      case "openSettings":
+        await openSettings();
+        return;
+      case "pickFolder":
+        // VS Code's own folder dialog, the same on every platform; the window reopens on the folder.
+        await vscode.commands.executeCommand("vscode.openFolder");
+        return;
       case "refresh":
         return this.refresh();
       case "createProject":
@@ -979,6 +1184,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     const project = this.state.project;
     typed = (typed ?? "").trim();
     if (!project || !typed) return;
+    if (!this.isReady()) {
+      // Not sent, so nothing can arrive twice: the text goes back in the box, the chips stay.
+      this.post({
+        type: "sendFailed",
+        text: typed,
+        message: "Not sent: the connection to NEO is not confirmed.",
+        hint: "Your text and attached files are kept. Send again once the sidebar says Connected.",
+      });
+      return;
+    }
     const sending = [...this.attachments];
     try {
       // Read now, so NEO gets the files as they are at the moment of sending. A failure here
@@ -1013,7 +1228,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       this.attachments = this.attachments.filter((a) => !sending.includes(a));
       this.postState();
     } catch (err) {
-      this.post({ type: "sendFailed", text: typed, message: errorText(err) });
+      // Never resent from here: the text goes back in the box and the user decides.
+      const shown = this.actionFailed(err, "send");
+      this.post({ type: "sendFailed", text: typed, ...shown });
     }
   }
 
@@ -1027,12 +1244,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
    */
   async startSession(typed?: string): Promise<boolean> {
     const project = this.state.project;
-    const done = (outcome: "started" | "cancelled" | "failed", message?: string) => {
-      this.post({ type: "sessionStart", outcome, message });
+    const done = (outcome: "started" | "cancelled" | "failed", problem?: Problem) => {
+      this.post({ type: "sessionStart", outcome, ...(problem ? { message: problem.summary, hint: problem.hint, detail: problem.detail } : {}) });
       return outcome === "started";
     };
-    if (!project || this.state.connection !== "connected") {
+    if (!project) {
       void vscode.window.showInformationMessage("NEO: open a NEO project first.");
+      return done("cancelled");
+    }
+    if (!this.isReady()) {
+      void this.explainOffline("Starting a new session");
       return done("cancelled");
     }
     let kinds: Record<string, SessionKind>;
@@ -1047,7 +1268,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       }
       kinds = (await this.client.sessions(project.id)).kinds;
     } catch (err) {
-      return done("failed", errorText(err));
+      return done("failed", this.actionFailed(err, "startSession", false));
     }
 
     let request = (typed ?? "").trim();
@@ -1089,20 +1310,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     try {
       text = await composeMessage(request, sending);
     } catch (err) {
-      return done("failed", errorText(err));
+      return done("failed", { summary: "Could not start a new session.", hint: errorText(err) });
     }
     if (text.length > SESSION_REQUEST_MAX) {
-      return done(
-        "failed",
-        `A new session's request can be at most ${SESSION_REQUEST_MAX.toLocaleString()} characters ` +
+      return done("failed", {
+        summary: "Could not start a new session.",
+        hint:
+          `A new session's request can be at most ${SESSION_REQUEST_MAX.toLocaleString()} characters ` +
           `(this one is ${text.length.toLocaleString()} with its attachments). Remove an attachment or shorten it.`,
-      );
+      });
     }
     if (project !== this.state.project) return done("cancelled");      // switched away meanwhile
     try {
       await this.client.startSession(project.id, { kind, request: text });
     } catch (err) {
-      return done("failed", errorText(err));
+      // Not retried: a session that did start must not be started twice. The re-read shows which.
+      return done("failed", this.actionFailed(err, "startSession"));
     }
     this.attachments = this.attachments.filter((a) => !sending.includes(a));
     done("started");
@@ -1117,6 +1340,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private async answer(m: { request?: string; text?: string; answers?: string[] }): Promise<void> {
     const project = this.state.project;
     if (!project) return;
+    if (!this.isReady()) {
+      this.post({ type: "answerFailed", message: "Not sent: the connection to NEO is not confirmed.", hint: "Answer again once the sidebar says Connected." });
+      return;
+    }
     this.notice = null;
     this.state.stoppedAt = undefined;
     this.clearAttention();
@@ -1131,19 +1358,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         await this.client.message(project.id, m.text ?? "");
       }
     } catch (err) {
-      this.post({ type: "answerFailed", message: errorText(err) });
+      this.post({ type: "answerFailed", ...this.actionFailed(err, "answer") });
     }
   }
 
   private async approve(reason?: string): Promise<void> {
     const project = this.state.project;
     if (!project) return;
+    if (!this.gateReady()) return;
     const overrule = reason && reason.trim() ? { reason: reason.trim() } : undefined;
     try {
       const r = await this.client.approve(project.id, overrule);
       this.gateClosed(r.phase);
     } catch (err) {
-      this.gateRefused(err);
+      this.gateRefused(err, "approve");
     }
   }
 
@@ -1151,12 +1379,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     const project = this.state.project;
     feedback = (feedback ?? "").trim();
     if (!project || !feedback) return;
+    if (!this.gateReady()) return;
     try {
       const r = await this.client.reject(project.id, feedback);
       this.gateClosed(r.phase);
     } catch (err) {
-      this.gateRefused(err);
+      this.gateRefused(err, "reject");
     }
+  }
+
+  private gateReady(): boolean {
+    if (this.isReady()) return true;
+    this.post({ type: "gateFailed", message: "Not sent: the connection to NEO is not confirmed.", hint: "Decide the gate again once the sidebar says Connected." });
+    return false;
   }
 
   /**
@@ -1184,8 +1419,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
    * A refused approval. A 409 carrying `failed` means the checks did not pass: they are shown,
    * and nothing is retried. "Approve anyway" exists only as a separate, explicit act with a reason.
    */
-  private gateRefused(err: unknown): void {
-    if (err instanceof NeoHttpError && err.detail && typeof err.detail === "object") {
+  private gateRefused(err: unknown, action: "approve" | "reject"): void {
+    if (err instanceof NeoHttpError && err.detail && typeof err.detail === "object" && !Array.isArray(err.detail)) {
       const d = err.detail as { error?: string; failed?: unknown; artifact_missing?: boolean; confirmable?: boolean };
       this.post({
         type: "gateRefused",
@@ -1193,11 +1428,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         failed: Array.isArray(d.failed) ? d.failed : [],
         confirmable: Boolean(d.confirmable),
         artifactMissing: Boolean(d.artifact_missing),
+        detail: err.technical(),
       });
+      void this.resync();
+    } else if (err instanceof NeoHttpError && err.status < 500) {
+      // NEO's own refusal, in its words (e.g. the project is no longer at this gate).
+      this.post({ type: "gateRefused", message: err.message, failed: [], confirmable: false, detail: err.technical() });
+      void this.resync();
     } else {
-      this.post({ type: "gateRefused", message: errorText(err), failed: [], confirmable: false });
+      // Not a refusal: NEO could not be reached or failed. Nothing is retried; the card stays usable.
+      this.post({ type: "gateFailed", ...this.actionFailed(err, action) });
     }
-    void this.resync();
   }
 
   /**
@@ -1210,6 +1451,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private async abort(): Promise<void> {
     const project = this.state.project;
     if (!project || this.state.stopping) return;
+    if (!this.confirmReady()) return;
     this.state.stopping = true;
     this.stopRequestedAt = Date.now();
     this.state.stoppedAt = undefined;
@@ -1222,7 +1464,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       this.state.stopping = false;
       this.stopRequestedAt = 0;
       this.postState();
-      this.post({ type: "toast", level: "error", text: `Could not stop: ${errorText(err)}` });
+      this.postProblem(this.actionFailed(err, "abort"));
     }
   }
 
@@ -1257,9 +1499,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     const folder = this.state.folder;
     name = (name ?? "").trim();
     idea = (idea ?? "").trim();
-    const fail = (message: string) => this.post({ type: "newProjectFailed", message });
+    const fail = (message: string, problem?: Problem) =>
+      this.post({ type: "newProjectFailed", message, hint: problem?.hint, detail: problem?.detail });
     if (this.state.connection !== "connected") {
-      return fail(`NEO not reachable at ${this.state.serverHost}. Start NEO, press Retry, then create the project.`);
+      return fail(`NEO is offline (${this.client.baseUrl}). Start the NEO server, press Retry, then create the project.`);
     }
     if (!folder) return fail("Open a folder first: the project is created in the open folder.");
     if (this.folderIsSelectedProject()) {
@@ -1296,7 +1539,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         interaction: interaction as "normal",
       });
     } catch (err) {
-      return fail(errorText(err));
+      // Not retried: a project that was created must not be created twice. Projects shows which.
+      const problem = this.actionFailed(err, "createProject", false);
+      return fail(problem.summary, problem);
     }
     if (!samePath(created.path, folder)) {
       this.post({
@@ -1312,7 +1557,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     try {
       await this.client.start(created.id, idea);
     } catch (err) {
-      this.post({ type: "toast", level: "error", text: `Created, but could not start: ${errorText(err)}` });
+      // The project exists either way; the message box starts it (send() on a setup project).
+      const problem = this.actionFailed(err, "startProject", false);
+      if (!(err instanceof NeoUnreachable && err.maybeDelivered)) problem.hint = "Send your request in the message box to start it.";
+      this.postProblem(problem);
     }
     this.post({ type: "projectCreated" });
     const gen = ++this.generation;
@@ -1322,21 +1570,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
   // --- helpers ----------------------------------------------------------------------------
 
-  private fail(err: unknown): void {
-    if (err instanceof NeoUnreachable) {
-      this.state.connection = "unreachable";
-      this.state.connectionError = err.message;
-    } else {
-      this.post({ type: "toast", level: "error", text: errorText(err) });
-    }
+  /**
+   * A failed read. Unreachable: the offline state (or "Reconnecting…" with a project open). Anything
+   * else: with a project on screen, a toast with its details; with nothing on screen, the empty state
+   * says what failed, with Retry.
+   */
+  private fail(err: unknown, action: ErrorAction): void {
     if (this.state.mode === "loading") this.state.mode = this.state.project ? "project" : "noProject";
+    const shown = describeError(err, action);
+    if (shown.offline) {
+      this.wentOffline(err, shown);
+      return;
+    }
+    logError(shown);
+    if (this.state.mode === "project") this.postProblem(problemOf(shown));
+    else this.state.problem = problemOf(shown);
     this.postState();
+  }
+
+  /**
+   * A user action NEO did not confirm. What it means goes back to the caller to show; NEO being
+   * unreachable is noted as a lost connection; otherwise the state is re-read once (a read, so safe)
+   * in case the action landed or the state moved. The action itself is never repeated.
+   */
+  private actionFailed(err: unknown, action: ErrorAction, reread = true): Problem & { message: string } {
+    const shown = describeError(err, action);
+    logError(shown);
+    if (shown.offline) {
+      if (this.state.project && this.state.mode === "project") this.noteDown(err);
+      else this.wentOffline(err, shown);
+    } else if (reread) {
+      void this.resync();
+    }
+    return { ...problemOf(shown), message: shown.summary };
+  }
+
+  /** An error toast: the summary, what to do, and the details one click away. */
+  private postProblem(p: Problem): void {
+    this.post({ type: "toast", level: "error", text: p.summary, hint: p.hint, detail: p.detail, settings: p.config });
   }
 
   private blankState(connection: Connection): ViewState {
     return {
       serverHost: hostOf(this.client.baseUrl),
+      serverUrl: this.client.baseUrl,
       connection,
+      retrying: false,
+      ready: false,
       stream: "off",
       mode: "loading",
       stages: [],
@@ -1357,6 +1637,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   }
 
   private postState(): void {
+    this.state.ready = this.isReady();
     this.state.attachments = this.attachments.map(viewOf);
     this.state.suggestion = this.state.mode === "project" ? this.suggestion() : null;
     this.settleStopping();
@@ -1547,6 +1828,10 @@ function serverUrl(): string {
 
 function maxSeq(events: NeoEvent[], floor: number): number {
   return events.reduce((m, e) => (typeof e.seq === "number" && e.seq > m ? e.seq : m), floor);
+}
+
+function problemOf(e: ErrorView): Problem {
+  return { summary: e.summary, hint: e.hint, detail: e.detail, config: e.config || undefined };
 }
 
 function errorText(err: unknown): string {

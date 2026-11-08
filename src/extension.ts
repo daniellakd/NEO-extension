@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { ChatViewProvider } from "./chatViewProvider";
 import { registerCommands } from "./commands";
+import { openSettings } from "./errors";
 
 /**
  * NEO: a sidebar chat over the local NEO-AG orchestrator. The extension never starts NEO and

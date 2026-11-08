@@ -18,6 +18,8 @@
     contextSig: "",            // the attachments and suggestion last drawn
     atPos: -1,                 // where an "@" that opened the file picker was typed
     startingSession: false,    // a new session was asked for and NEO has not answered yet
+    bannerSig: "",             // what the banner / empty state last drew
+    gatePending: false,        // an approve / reject was sent and NEO has not answered yet
   };
 
   // --- small helpers -----------------------------------------------------------------------
@@ -33,10 +35,53 @@
     $(id).classList.toggle("hidden", !visible);
   }
 
-  function toast(text, level) {
-    const node = el("div", `toast ${level || "info"}`, text);
+  /**
+   * A short message. An error can carry a hint (what to do) and technical detail: the detail stays
+   * folded under "Show details", and a toast that has any stays until it is closed, so it can be read.
+   */
+  function toast(text, level, extra) {
+    const opts = extra || {};
+    const node = el("div", `toast ${level || "info"}`);
+    node.appendChild(el("div", "toast-text", text));
+    if (opts.hint) node.appendChild(el("div", "toast-hint", opts.hint));
+    const sticky = Boolean(opts.detail || opts.settings);
+    if (opts.settings) {
+      const row = el("div", "toast-actions");
+      row.appendChild(settingsButton("secondary small"));
+      node.appendChild(row);
+    }
+    if (opts.detail) node.appendChild(detailsBlock(opts.detail));
+    if (sticky) {
+      node.classList.add("sticky");
+      const close = el("button", "toast-close", "×");
+      close.type = "button";
+      close.title = "Dismiss";
+      close.setAttribute("aria-label", "Dismiss");
+      close.addEventListener("click", () => node.remove());
+      node.prepend(close);
+    } else {
+      setTimeout(() => node.remove(), level === "error" ? 7000 : 3500);
+    }
     $("toasts").appendChild(node);
-    setTimeout(() => node.remove(), level === "error" ? 7000 : 3500);
+  }
+
+  /** Technical detail (HTTP status, NEO's response, the network cause), folded by default. */
+  function detailsBlock(detail) {
+    const box = el("details", "error-details");
+    const summary = el("summary", null, "Show details");
+    box.appendChild(summary);
+    box.appendChild(el("pre", null, detail));
+    box.addEventListener("toggle", () => (summary.textContent = box.open ? "Hide details" : "Show details"));
+    return box;
+  }
+
+  /** Summary, hint and details in one place: an inline error (the forms, the gate card). */
+  function setError(node, m) {
+    node.innerHTML = "";
+    if (!m) return;
+    node.appendChild(el("div", null, m.message || m.summary || ""));
+    if (m.hint) node.appendChild(el("div", "error-hint", m.hint));
+    if (m.detail) node.appendChild(detailsBlock(m.detail));
   }
 
   function nearBottom() {
@@ -457,9 +502,10 @@
     blocks.forEach((b) => {
       const active = b === live;
       b.classList.toggle("open", active);
-      b.querySelectorAll("button.option").forEach((btn) => (btn.disabled = !active));
+      b.querySelectorAll("button.option").forEach((btn) => (btn.disabled = !active || !s.ready));
       const all = b.querySelector(".answer-all");
-      if (all && !active) all.disabled = true;
+      // "Send answers" needs every question answered, as before, and a confirmed connection.
+      if (all) all.disabled = !active || !s.ready || ![...b.querySelectorAll(".options.choice")].every((r) => r.querySelector(".chosen"));
     });
   }
 
@@ -508,19 +554,21 @@
 
     // connection line: a short word in the header, the full story in the tooltip
     const conn = $("conn");
-    const reconnecting = connected && s.stream === "reconnecting";
+    const reconnecting = (connected && s.stream === "reconnecting") || s.connection === "reconnecting";
     const runtimeDown = connected && s.runtimeReachable === false;
     conn.className = `conn ${s.connection}${reconnecting || runtimeDown ? " degraded" : ""}`;
     $("conn-text").textContent = s.connection === "connecting" ? "Connecting…"
-      : !connected ? "Not connected"
+      : s.connection === "unreachable" ? "Offline"
       : reconnecting ? "Reconnecting…"
       : runtimeDown ? "Agent runtime unreachable" : "Connected";
-    const detail = [s.connection === "connecting" ? `Connecting to ${s.serverHost}`
-      : connected ? `Connected to ${s.serverHost}` : `Not connected to ${s.serverHost}`];
-    if (reconnecting) detail.push("live stream reconnecting");
+    const detail = [s.connection === "connecting" ? `Connecting to ${s.serverUrl}`
+      : connected ? `Connected to ${s.serverUrl}`
+      : s.connection === "reconnecting" ? `Reconnecting to ${s.serverUrl}` : `NEO is offline: ${s.serverUrl}`];
+    if (connected && s.stream === "reconnecting") detail.push("live stream reconnecting");
     if (runtimeDown) detail.push("agent runtime unreachable");
-    if (!connected && s.connectionError) detail.push(s.connectionError);
+    if (!connected && s.offline && s.offline.hint) detail.push(s.offline.hint);
     conn.title = detail.join(" · ");
+    renderHeaderActions(s);
 
     // Project name only for a real NEO project: an open folder that is not one yet stays unnamed.
     const inProject = s.mode === "project";
@@ -552,12 +600,16 @@
     // A completed session takes no more work: what is sent next starts a new session (the host's
     // startSession, NEO's POST /sessions). It is never a message into the finished one.
     const finished = inProject && s.phase === "done";
-    const canSend = connected && inProject && (!s.busy || s.awaiting) && !view.startingSession;
+    // `ready` is the host's "confirmed Connected" (the header's word): never while connecting,
+    // reconnecting or offline. The box stays editable and the chips stay; only the action waits.
+    const ready = Boolean(s.ready);
+    const canSend = ready && inProject && (!s.busy || s.awaiting) && !view.startingSession;
     $("send").disabled = !canSend;
     $("composer").classList.toggle("disabled", !canSend);
     $("composer").classList.toggle("working", working);
     $("composer").classList.toggle("finished", finished);
-    $("send").title = finished ? `Start a new session with this request (${sendKey})` : `Send (${sendKey})`;
+    const action = finished ? "Start a new session with this request" : "Send";
+    $("send").title = ready ? `${action} (${sendKey})` : `${action}: ${notReadyReason(s)}`;
     $("send").setAttribute("aria-label", finished ? "Start a new session" : "Send");
     $("send-hint").textContent = finished ? `${sendKey} · new session` : `${sendKey} to send`;
     $("message").placeholder = !inProject ? "" : s.phase === "setup"
@@ -565,7 +617,7 @@
       : finished ? "This session is complete. Describe the next piece of work — it starts a new session."
       : s.awaiting ? "Answer NEO…" : working ? "NEO is working — you can type, Send unlocks when it stops"
       : s.atGate ? "Message NEO, or use the gate above" : "Message NEO…";
-    renderStop(live, working);
+    renderStop(live, working, s);
     renderComposerStatus(s, connected, working, phase, kind, live);
     renderContext(s);
 
@@ -635,16 +687,24 @@
    * Stop. Offered only while NEO is actually running a turn — never while it waits for an answer,
    * waits at a gate, is idle, or is done — and it says what it does before and after the click.
    */
-  function renderStop(live, working) {
+  function renderStop(live, working, s) {
     const button = $("abort");
     const stopping = Boolean(live && live.activity === "stopping");
     show("abort", Boolean(working || stopping));
     $("abort-label").textContent = stopping ? "Stopping…" : "Stop";
-    button.disabled = stopping;
+    button.disabled = stopping || !s.ready;
     button.classList.toggle("stopping", stopping);
     button.title = stopping
       ? "Stop was sent. NEO is ending the running turn; this takes a moment."
+      : !s.ready ? `Stop: ${notReadyReason(s)}`
       : (live && live.stopHint) || "Stop the running turn";
+  }
+
+  /** Why an action that changes NEO's state is unavailable right now. */
+  function notReadyReason(s) {
+    return s.connection === "connecting" ? "unavailable while connecting to NEO"
+      : s.connection === "unreachable" ? "unavailable while NEO is offline"
+      : "unavailable while reconnecting to NEO";
   }
 
   function renderRail(stages) {
@@ -666,65 +726,162 @@
     return button;
   }
 
-  const retryButton = () => actionButton("Retry", "primary", () => vscode.postMessage({ type: "connect" }));
+  // Retry repeats reads only (the host's retry): with a project open it stays, with its draft and context.
+  function retryButton(s, cls) {
+    const button = actionButton(s && s.retrying ? "Retrying…" : "Retry", cls || "primary", () => vscode.postMessage({ type: "retry" }));
+    button.disabled = Boolean(s && s.retrying);
+    return button;
+  }
+  function settingsButton(cls) {
+    const button = actionButton("Open NEO Settings", cls || "secondary", () => vscode.postMessage({ type: "openSettings" }));
+    button.title = "Open VS Code Settings for NEO (the server URL)";
+    return button;
+  }
   const projectsButton = (cls) => actionButton("Projects", cls, () => vscode.postMessage({ type: "switchProject" }));
   const webButton = () => actionButton("Open Web UI", "secondary", () => vscode.postMessage({ type: "openBrowser" }));
 
   /**
+   * The header's actions stay where they are; the ones that need NEO are disabled while it cannot
+   * answer, and say why on hover.
+   */
+  function renderHeaderActions(s) {
+    const online = s.connection === "connected";
+    const why = s.connection === "connecting"
+      ? "Connecting to NEO…"
+      : `NEO is offline (${s.serverUrl}). Start the NEO server, then Retry.`;
+    const set = (id, enabled, title) => {
+      const button = $(id);
+      button.disabled = !enabled;
+      button.title = title;
+    };
+    set("act-projects", online, online ? "Projects: switch to another NEO project" : `Projects unavailable: ${why}`);
+    set("act-new", online && Boolean(s.folder),
+      !online ? `New Project unavailable: ${why}`
+        : !s.folder ? "New Project unavailable: open a folder first. A new project is created in the open folder."
+        : "New Project in the open folder");
+    set("act-web", online, online ? "Open the NEO Web UI"
+      : `Web UI unavailable: it is served by the NEO server. ${why}`);
+  }
+
+  /** The brand mark at empty-state size. */
+  function bigMark() {
+    const mark = document.querySelector(".title .brand-mark").cloneNode(true);
+    mark.setAttribute("width", "40");
+    mark.setAttribute("height", "40");
+    return mark;
+  }
+
+  /** One line of the first-run status block: a dot, then what it says. */
+  function statusLine(tone, ...parts) {
+    const line = el("div", `empty-status-line ${tone}`);
+    line.appendChild(el("span", "dot"));
+    const text = el("span", "empty-status-text");
+    parts.forEach((p) => text.append(typeof p === "string" ? document.createTextNode(p) : p));
+    line.appendChild(text);
+    return line;
+  }
+
+  function offlineHelp(s, box) {
+    const off = s.offline || {};
+    if (off.config && off.hint) box.appendChild(el("p", "empty-hint", off.hint));
+    if (off.detail) box.appendChild(detailsBlock(off.detail));
+  }
+
+  /**
    * Everything that is not a conversation. Inside a project only a lost connection is shown, as a
-   * slim banner above the transcript; without one, the panel is a centred empty state.
+   * slim banner above the transcript; without one, the panel is a centred empty state that says
+   * what NEO is, whether it is connected, and whether this folder is a NEO project.
    */
   function renderBanner(s) {
     const banner = $("banner");
-    banner.innerHTML = "";
     const unreachable = s.connection === "unreachable";
-    let visible = true;
+    const visible = s.mode !== "project" || unreachable || s.connection === "reconnecting";
+    // Redrawn only when what it says changes: state arrives often, and a rebuild would close an
+    // open "Show details" and swallow a click on Retry.
+    const sig = JSON.stringify([s.mode, s.connection, s.serverUrl, s.offline, s.problem, s.retrying, s.folder, s.folderName]);
+    if (sig !== view.bannerSig) {
+      view.bannerSig = sig;
+      banner.innerHTML = "";
+      drawBanner(s, banner, unreachable);
+    }
+    show("banner", visible && $("new-project").classList.contains("hidden"));
+  }
+
+  function drawBanner(s, banner, unreachable) {
     if (s.mode === "project") {
-      visible = unreachable;
-      if (unreachable) {
+      if (s.connection === "reconnecting") {
+        banner.className = "banner warn";
+        const head = el("div", "banner-head");
+        head.append(el("span", "spinner"), el("strong", null, "Reconnecting to NEO…"));
+        banner.appendChild(head);
+        banner.appendChild(el("p", "muted", "NEO stopped answering. Your project, draft and attached files are kept while the sidebar keeps trying."));
+      } else if (unreachable) {
         banner.className = "banner error";
-        banner.appendChild(el("strong", null, `NEO not reachable at ${s.serverHost}`));
-        banner.appendChild(el("p", "muted", "Start NEO separately (scripts\\start.ps1 or scripts/start.sh), then retry."));
-        banner.appendChild(retryButton());
+        banner.appendChild(el("strong", null, "NEO is offline"));
+        const lead = el("p");
+        lead.append(document.createTextNode("Can't reach the NEO server at "), el("code", "path", s.serverUrl),
+          document.createTextNode(". Your project, draft and attached files are kept; the sidebar reconnects on its own when NEO is back."));
+        banner.appendChild(lead);
+        const buttons = el("div", "buttons");
+        buttons.append(retryButton(s), settingsButton());
+        banner.appendChild(buttons);
+        offlineHelp(s, banner);
       }
     } else if (s.mode === "loading" || s.connection === "connecting") {
       banner.className = "empty";
       const line = el("div", "empty-loading muted");
       line.append(el("span", "spinner"), document.createTextNode(
-        s.connection === "connecting" ? `Connecting to NEO at ${s.serverHost}…` : "Loading project…"));
+        s.connection === "connecting" ? `Connecting to NEO at ${s.serverUrl}…` : "Loading project…"));
       banner.appendChild(line);
     } else {
       banner.className = "empty";
-      const mark = document.querySelector(".title .brand-mark").cloneNode(true);
-      mark.setAttribute("width", "40");
-      mark.setAttribute("height", "40");
-      banner.append(mark, el("div", "empty-title", "NEO"));
+      banner.append(bigMark());
       const buttons = el("div", "empty-actions");
       if (unreachable) {
-        banner.appendChild(el("p", "empty-lead", `NEO is not reachable at ${s.serverHost}.`));
-        banner.appendChild(el("p", "muted", "Start NEO separately (scripts\\start.ps1 or scripts/start.sh), then retry."));
-        buttons.appendChild(retryButton());
-      } else if (s.mode === "noFolder") {
-        banner.appendChild(el("p", "empty-lead", "Start a new project or connect to an existing NEO project."));
-        banner.appendChild(el("p", "muted", "Open a folder to create a project there, or pick one NEO already knows."));
-        buttons.append(projectsButton("primary"), webButton());
+        banner.appendChild(el("div", "empty-title", "NEO is offline"));
+        const lead = el("p", "empty-lead");
+        lead.append(document.createTextNode("Can't reach the NEO server at "), el("code", "path", s.serverUrl), document.createTextNode("."));
+        banner.appendChild(lead);
+        banner.appendChild(el("p", "muted", "NEO runs as a separate server: start it (scripts\\start.ps1 on Windows, scripts/start.sh on Linux), then Retry. If it runs at another address, change the server URL in the NEO settings."));
+        buttons.append(retryButton(s), settingsButton());
+        banner.appendChild(buttons);
+        offlineHelp(s, banner);
+        banner.appendChild(el("p", "muted small", "The sidebar checks again every 10 seconds."));
       } else {
-        banner.appendChild(el("p", "empty-lead", "Start a new project or connect to an existing NEO project."));
-        if (s.folder) {
-          const where = el("p", "muted empty-folder");
-          where.append(document.createTextNode("This folder is not a NEO project yet: "), el("code", "path", s.folder));
-          banner.appendChild(where);
+        banner.appendChild(el("div", "empty-title", "NEO"));
+        banner.appendChild(el("p", "empty-lead",
+          "NEO builds software from your request through a guided pipeline: design, plan, build and review, stopping at gates for your approval."));
+        const status = el("div", "empty-status");
+        status.appendChild(statusLine("ok", "Connected to ", el("code", "path", s.serverUrl)));
+        if (s.mode === "noFolder") {
+          status.appendChild(statusLine("muted", "No folder open. Open one to create a NEO project there."));
+          buttons.append(
+            actionButton("Open Folder", "primary", () => vscode.postMessage({ type: "pickFolder" })),
+            projectsButton("secondary"),
+            webButton(),
+          );
+        } else {
+          const name = el("code", "path", s.folderName || s.folder || "");
+          name.title = s.folder || "";
+          status.appendChild(statusLine("warn", "Folder ", name, " is not a NEO project yet."));
+          buttons.append(
+            actionButton("New Project", "primary", () => openNewProject(s.folderName || "")),
+            projectsButton("secondary"),
+            webButton(),
+          );
         }
-        buttons.append(
-          actionButton("New Project", "primary", () => openNewProject(s.folderName || "")),
-          projectsButton("secondary"),
-          webButton(),
-        );
+        banner.appendChild(status);
+        if (s.problem) {
+          // A read that failed with nothing on screen to keep: what failed, Retry, and the details.
+          const box = el("div", "empty-problem");
+          setError(box, s.problem);
+          box.appendChild(retryButton(s, "secondary small"));
+          banner.appendChild(box);
+        }
+        banner.appendChild(buttons);
       }
-      banner.appendChild(buttons);
       banner.appendChild(el("div", "empty-by", "Powered by CodeValue"));
     }
-    show("banner", visible && $("new-project").classList.contains("hidden"));
   }
 
   function renderGate(s) {
@@ -738,6 +895,7 @@
     const sig = JSON.stringify([gate.phase, gate.title, gate.artifact_path, (gate.artifact || "").length,
                                 checks, Boolean(gate.checks_pending)]);
     show("gate", true);
+    syncGateButtons();
     if (sig === view.gateSig) return;                 // unchanged: keep the user's text and scroll
     const phaseChanged = !view.gateSig || JSON.parse(view.gateSig)[0] !== gate.phase;
     view.gateSig = sig;
@@ -778,7 +936,8 @@
       list.appendChild(li);
     });
     const failing = checks.filter((c) => !c.advisory && !c.ok).length;
-    $("gate-approve").title = failing ? `${failing} check(s) not passing — NEO will refuse a plain approval` : "";
+    $("gate-approve").dataset.baseTitle = failing ? `${failing} check(s) not passing — NEO will refuse a plain approval` : "";
+    syncGateButtons();
   }
 
   function resetGateCard() {
@@ -792,7 +951,20 @@
   }
 
   function gateBusy(busy) {
-    ["gate-approve", "gate-reject", "gate-anyway"].forEach((id) => ($(id).disabled = busy));
+    view.gatePending = busy;
+    syncGateButtons();
+  }
+
+  /** The gate's buttons: off while a decision is on its way, and while NEO is not confirmed reachable. */
+  function syncGateButtons() {
+    const s = view.state || {};
+    const off = view.gatePending || !s.ready;
+    ["gate-approve", "gate-reject", "gate-anyway"].forEach((id) => ($(id).disabled = off));
+    const reason = !view.gatePending && !s.ready ? notReadyReason(s) : "";
+    ["gate-approve", "gate-reject", "gate-anyway"].forEach((id) => {
+      const button = $(id);
+      button.title = reason ? `${button.textContent}: ${reason}` : button.dataset.baseTitle || "";
+    });
   }
 
   $("gate-approve").addEventListener("click", () => {
@@ -835,6 +1007,7 @@
     box.innerHTML = "";
     box.appendChild(el("strong", null, "NEO refused the approval"));
     box.appendChild(el("p", null, m.message || ""));
+    if (m.detail) box.appendChild(detailsBlock(m.detail));
     if (m.failed && m.failed.length) {
       const ul = el("ul", "checks");
       m.failed.forEach((c) => {
@@ -993,16 +1166,21 @@
         $("transcript").querySelectorAll(".msg.user.optimistic").forEach((n) => n.remove());
         if (!$("message").value) $("message").value = m.text || "";   // do not lose what was typed
         fitInput();
-        toast(m.message, "error");
+        toast(m.message, "error", m);
         break;
       case "answerFailed":
         $("transcript").querySelectorAll(".msg.user.optimistic").forEach((n) => n.remove());
         document.querySelectorAll(".msg.question.answered").forEach((b) => b.classList.remove("answered"));
         syncQuestions();
-        toast(m.message, "error");
+        toast(m.message, "error", m);
         break;
       case "gateRefused":
         onGateRefused(m);
+        break;
+      case "gateFailed":
+        // NEO did not answer (or failed): not a refusal. The card stays as it was, ready to try again.
+        gateBusy(false);
+        setError($("gate-error"), m);
         break;
       case "gateDone":
         resetGateCard();
@@ -1013,7 +1191,7 @@
         break;
       case "newProjectFailed": {
         newProjectDone();
-        $("np-error").textContent = m.message || "Could not create the project.";
+        setError($("np-error"), { ...m, message: m.message || "Could not create the project." });
         if (m.openPath) {
           const open = el("button", "secondary small", "Open that folder");
           open.addEventListener("click", () => vscode.postMessage({ type: "openFolder", path: m.openPath }));
@@ -1028,7 +1206,7 @@
         toast("Project created and started", "ok");
         break;
       case "toast":
-        toast(m.text, m.level);
+        toast(m.text, m.level, m);
         break;
       case "atResolved":
         atResolved();
@@ -1039,7 +1217,7 @@
           $("message").value = "";
           fitInput();
         } else if (m.outcome === "failed") {
-          toast(m.message || "Could not start a new session.", "error");
+          toast(m.message || "Could not start a new session.", "error", m);
         }
         if (view.state) applyState(view.state);
         break;

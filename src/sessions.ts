@@ -22,6 +22,7 @@ import {
   sessionState,
   sessionStateLabel,
 } from "./sessionHistory";
+import { describeError, notifyError, plainText } from "./errors";
 
 /**
  * Sessions, history and resume for the sidebar (the pure rules are in src/sessionHistory.ts).
@@ -312,7 +313,8 @@ export class SessionsController implements vscode.Disposable {
       list = data.sessions;
       this.kinds = data.kinds;
     } catch (err) {
-      void vscode.window.showErrorMessage(`NEO: could not read the sessions: ${err instanceof Error ? err.message : String(err)}`);
+      // A read: Retry is safe.
+      void notifyError(describeError(err, "loadSessions"), () => this.pick());
       return;
     }
     if (projectId !== this.projectId) return;
@@ -460,7 +462,13 @@ export class SessionsController implements vscode.Disposable {
         takenAt: Date.now() / 1000,
       });
     } catch (err) {
-      return `# Session unavailable\n\nNEO could not be read: ${err instanceof Error ? err.message : String(err)}\n`;
+      // The summary up front; the technical detail folded, as in the sidebar.
+      const shown = describeError(err, "loadSessions");
+      const fence = "```";
+      const details = shown.detail
+        ? `\n\n<details><summary>Show details</summary>\n\n${fence}\n${shown.detail}\n${fence}\n\n</details>`
+        : "";
+      return `# Session unavailable\n\n${plainText(shown)}${details}\n`;
     }
   }
 
