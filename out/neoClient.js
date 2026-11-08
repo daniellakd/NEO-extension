@@ -54,6 +54,13 @@ class NeoClient {
         const data = await this.request("GET", `/api/projects/${enc(id)}/sessions`);
         return { sessions: data.sessions ?? [], kinds: data.kinds ?? {} };
     }
+    /**
+     * Another piece of work on the same project (NEO's POST /sessions): the current session ends, a
+     * new one starts at its kind's first phase, and the earlier sessions keep their own history.
+     */
+    startSession(id, body) {
+        return this.request("POST", `/api/projects/${enc(id)}/sessions`, body);
+    }
     createProject(body) {
         return this.request("POST", "/api/projects", body);
     }

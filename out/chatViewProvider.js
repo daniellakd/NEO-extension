@@ -32,6 +32,7 @@ const context_1 = require("./context");
 const progress_1 = require("./progress");
 const changes_1 = require("./changes");
 const plan_1 = require("./plan");
+const sessionHistory_1 = require("./sessionHistory");
 const sessions_1 = require("./sessions");
 const sseStream_1 = require("./sseStream");
 const workspace_1 = require("./workspace");
@@ -56,6 +57,10 @@ const IGNORED_KINDS = new Set(["hello", "usage", "reasoning", "permission", "sig
 // How long the sidebar waits for NEO to report the aborted turn ending before it stops saying
 // "stopping". NEO's abort semantics are unchanged; this is only what the panel shows.
 const STOP_SETTLE_MS = 30_000;
+// NEO's POST /sessions takes a request of at most this many characters (app.py SessionIn).
+const SESSION_REQUEST_MAX = 20_000;
+const DONE_REFUSAL = "This session is complete, so the message was not sent into it. Press Send again to start a new " +
+    "session with it - the completed one stays as read-only history.";
 class ChatViewProvider {
     extensionUri;
     static viewId = "neo.chat";
@@ -97,6 +102,8 @@ class ChatViewProvider {
     artifacts = new plan_1.PlanArtifacts();
     // NEO's sessions, "since you were away", and the read-only session snapshots (src/sessions.ts).
     sessions;
+    // The context keys last set, so each is only sent to VS Code when it changes.
+    contextKeys = {};
     constructor(extensionUri, store) {
         this.extensionUri = extensionUri;
         this.client = new neoClient_1.NeoClient(serverUrl());
@@ -110,6 +117,8 @@ class ChatViewProvider {
             // "Seen" means on screen: the sidebar is visible and the window has focus.
             viewed: () => Boolean(this.view?.visible) && (vscode.window.state?.focused ?? true),
             projectName: () => this.state.project?.name,
+            status: () => ({ phase: this.state.phase, busy: this.state.busy, waiting: this.state.awaiting || this.state.atGate }),
+            startSession: async () => void (await this.startSession()),
         });
         this.trackEditor(vscode.window.activeTextEditor);
         this.disposables.push(vscode.window.onDidChangeActiveTextEditor((e) => this.trackEditor(e)), vscode.window.onDidChangeTextEditorSelection((e) => this.trackEditor(e.textEditor)));
@@ -386,6 +395,142 @@ class ChatViewProvider {
         const id = this.state.project?.id;
         const url = this.client.baseUrl + (id ? `/?project=${encodeURIComponent(id)}` : "/");
         void vscode.env.openExternal(vscode.Uri.parse(url));
+    }
+    // --- commands: reaching what the sidebar already shows ----------------------------------
+    //
+    // Each one only opens or ends what the sidebar itself offers (the Stop button, a chip's Preview,
+    // the Changes strip, NEO: Sessions), through the same code. None of them loads, switches or
+    // starts a session, so looking at anything never changes the current one.
+    /** The project the commands act on, or undefined after saying there is none. */
+    commandProject() {
+        if (this.state.mode === "project" && this.state.project)
+            return this.state.project;
+        void vscode.window.showInformationMessage("NEO: open a NEO project first (NEO: Projects, or NEO: New Project).");
+        return undefined;
+    }
+    /** NEO: Stop Current Work - the sidebar's own Stop. Nothing to stop is said, not ignored. */
+    async stopCurrentWork() {
+        const project = this.commandProject();
+        if (!project)
+            return;
+        if (this.state.stopping) {
+            void vscode.window.showInformationMessage(`NEO: already stopping the current work on ${project.name}.`);
+            return;
+        }
+        if (!this.state.busy) {
+            void vscode.window.showInformationMessage(`NEO: nothing is running on ${project.name} right now.`);
+            return;
+        }
+        // The chat is where "stopping…" and then "stopped" are reported.
+        await vscode.commands.executeCommand(`${ChatViewProvider.viewId}.focus`);
+        await this.abort();
+    }
+    /** NEO: Open Design / NEO: Open Plan - the current session's document, as the chip's Preview opens it. */
+    async openDocument(kind) {
+        const project = this.commandProject();
+        if (!project)
+            return;
+        const outcome = await this.artifacts.openKind(kind === "plan" ? "plan" : "document", this.state.stages, async (items) => (await vscode.window.showQuickPick(items.map((i) => ({ item: i, label: i.label, description: `${i.path} · ${i.status}` })), { title: "NEO: Open Design", placeHolder: "Which document of the current session?" }))?.item);
+        if (outcome === "none") {
+            const sessionKind = this.state.sessions?.active?.kind;
+            const what = sessionKind ? `it is a ${(0, sessionHistory_1.kindLabel)(sessionKind)} session, which` : "this session";
+            void vscode.window.showInformationMessage(`NEO: the current session of ${project.name} has no ${kind}: ${what} does not go through a ${kind} step.`);
+        }
+        else if (outcome === "pending") {
+            void vscode.window.showInformationMessage(`NEO: no ${kind} yet in the current session of ${project.name}. It can be opened once NEO has written it.`);
+        }
+    }
+    /** NEO: Open Current Changes - the Changes strip's files; one picked opens its native diff. */
+    async openChanges() {
+        const project = this.commandProject();
+        if (!project)
+            return;
+        const info = (m) => void vscode.window.showInformationMessage(`NEO: ${m}`);
+        if (!(0, changes_1.changesPhase)(this.state.phase)) {
+            info(`no changes yet on ${project.name}. NEO's changes are listed from Execute on.`);
+            return;
+        }
+        const snap = this.changes.current(project.path);
+        if (!snap) {
+            info("still reading the changes. Try again in a moment.");
+            return;
+        }
+        if (snap.error) {
+            void vscode.window.showWarningMessage(`NEO: could not read the changes: ${snap.error}`);
+            return;
+        }
+        if (!snap.files.length) {
+            info(`no files changed${snap.label ? ` (${snap.label})` : ""}.`);
+            return;
+        }
+        const count = (n, sign) => (n === null ? "binary" : `${sign}${n}`);
+        const picked = await vscode.window.showQuickPick(snap.files.map((f) => ({
+            path: f.path,
+            label: path.posix.basename(f.path),
+            description: `${f.untracked ? "U" : f.status} · ${count(f.additions, "+")} ${count(f.deletions, "−")}`,
+            detail: f.oldPath ? `${f.oldPath} → ${f.path}` : f.path,
+        })), {
+            title: `NEO: Changes${snap.label ? ` · ${snap.label}` : ""}`,
+            placeHolder: `${snap.files.length} changed file${snap.files.length === 1 ? "" : "s"}${snap.truncated ? " (list truncated)" : ""}` +
+                " - pick one to open its read-only diff",
+            matchOnDetail: true,
+        });
+        if (picked)
+            await this.changes.openDiff(picked.path);
+    }
+    /** NEO: Go to… - the places the current project has right now, with where each stands. */
+    async goTo() {
+        const project = this.commandProject();
+        if (!project)
+            return;
+        const items = [];
+        const active = this.state.sessions?.active;
+        items.push({
+            label: "$(comment-discussion) Current session",
+            description: active ? `${active.title} · ${(0, sessionHistory_1.kindLabel)(active.kind)} · ${(0, sessionHistory_1.sessionStateLabel)(active.state, true)}` : project.name,
+            detail: "Show the NEO chat",
+            go: () => vscode.commands.executeCommand(`${ChatViewProvider.viewId}.focus`),
+        });
+        const describe = (i) => i.kind === "plan" && i.current
+            ? `task ${i.current.index} of ${i.current.total}`
+            : i.atGate ? "awaiting your approval" : i.status === "changes" ? "changes requested" : i.status;
+        const seen = new Set();
+        for (const doc of this.artifacts.current()) {
+            const kind = doc.kind === "plan" ? "plan" : "design";
+            if (seen.has(kind))
+                continue; // Open Design asks which, if there are several
+            seen.add(kind);
+            items.push({
+                label: `${kind === "plan" ? "$(checklist)" : "$(book)"} ${doc.label}`,
+                description: describe(doc),
+                detail: `${doc.path} - read-only preview`,
+                go: () => this.openDocument(kind),
+            });
+        }
+        if ((0, changes_1.changesPhase)(this.state.phase)) {
+            const snap = this.changes.current(project.path);
+            const n = snap ? snap.files.length : 0;
+            items.push({
+                label: "$(diff) Changes",
+                description: snap ? `${n} file${n === 1 ? "" : "s"}` : "reading…",
+                detail: "Open a changed file's diff",
+                go: () => this.openChanges(),
+            });
+        }
+        const count = this.state.sessions?.list.length;
+        items.push({
+            label: "$(history) Sessions",
+            description: count ? `${count} session${count === 1 ? "" : "s"}` : undefined,
+            detail: "Open a session as a read-only snapshot",
+            go: () => this.showSessions(),
+        });
+        const picked = await vscode.window.showQuickPick(items, {
+            title: `NEO: Go to · ${project.name}`,
+            placeHolder: "Where to?",
+            matchOnDescription: true,
+        });
+        if (picked)
+            await picked.go();
     }
     // --- project lifecycle ------------------------------------------------------------------
     async loadProject(id, gen) {
@@ -742,6 +887,9 @@ class ChatViewProvider {
                 return this.addContext(m.source);
             case "removeContext":
                 return this.removeContext(m.id);
+            case "startSession":
+                await this.startSession(m.text);
+                return;
         }
     }
     async send(typed) {
@@ -757,6 +905,14 @@ class ChatViewProvider {
             // The phase is read fresh, as the web UI does: a setup project is started, anything else
             // gets an ordinary message. Which phase follows is NEO's answer, not ours.
             const fresh = await this.client.project(project.id, 1);
+            // A completed session takes no more work: what is sent next must start a new session, never
+            // run inside the finished one. Refused here, text kept, whatever the webview thought.
+            if (fresh.phase === "done") {
+                this.state.phase = fresh.phase;
+                this.postState();
+                this.post({ type: "sendFailed", text: typed, message: DONE_REFUSAL });
+                return;
+            }
             if (fresh.phase === "setup") {
                 // This text becomes the project's idea; say so before the kickoff it is wrapped in arrives.
                 project.idea = text;
@@ -780,6 +936,98 @@ class ChatViewProvider {
         catch (err) {
             this.post({ type: "sendFailed", text: typed, message: errorText(err) });
         }
+    }
+    /**
+     * New work on this project once its current session is complete: NEO's own POST /sessions. The
+     * finished session ends and keeps its history; a new one starts at its kind's first phase; the
+     * sidebar then reloads onto it, exactly as opening the project would.
+     *
+     * `typed` is the message box's text; without it (the command, the Sessions picker) the request is
+     * asked for. Resolves true only once NEO has started the session.
+     */
+    async startSession(typed) {
+        const project = this.state.project;
+        const done = (outcome, message) => {
+            this.post({ type: "sessionStart", outcome, message });
+            return outcome === "started";
+        };
+        if (!project || this.state.connection !== "connected") {
+            void vscode.window.showInformationMessage("NEO: open a NEO project first.");
+            return done("cancelled");
+        }
+        let kinds;
+        try {
+            const fresh = await this.client.project(project.id, 1);
+            if (fresh.phase !== "done") {
+                void vscode.window.showInformationMessage(`NEO: the current session of ${project.name} is still in progress (${fresh.phase}). ` +
+                    "A new session can start once it is complete.");
+                return done("cancelled");
+            }
+            kinds = (await this.client.sessions(project.id)).kinds;
+        }
+        catch (err) {
+            return done("failed", errorText(err));
+        }
+        let request = (typed ?? "").trim();
+        if (!request) {
+            request = (await vscode.window.showInputBox({
+                title: `New session on ${project.name}`,
+                prompt: "What should NEO work on next? The completed session stays as read-only history.",
+                placeHolder: 'e.g. Add a GET /health endpoint that returns {"status":"ok"}.',
+                ignoreFocusOut: true,
+                validateInput: (v) => (v.trim() ? undefined : "Describe the work."),
+            }))?.trim() ?? "";
+            if (!request)
+                return done("cancelled");
+        }
+        const items = Object.entries(kinds).map(([key, k]) => ({
+            sessionKind: key,
+            label: k.label || key,
+            description: k.phase ? `starts at ${k.phase}` : undefined,
+            detail: k.description,
+        }));
+        let kind = "full";
+        if (items.length > 1) {
+            const picked = await vscode.window.showQuickPick(items, {
+                title: `New session on ${project.name}`,
+                placeHolder: "How much of NEO's pipeline should this work go through?",
+                ignoreFocusOut: true,
+            });
+            if (!picked)
+                return done("cancelled");
+            kind = picked.sessionKind;
+        }
+        else if (items.length === 1) {
+            kind = items[0].sessionKind;
+        }
+        const sending = typed !== undefined ? [...this.attachments] : [];
+        let text;
+        try {
+            text = await (0, context_1.composeMessage)(request, sending);
+        }
+        catch (err) {
+            return done("failed", errorText(err));
+        }
+        if (text.length > SESSION_REQUEST_MAX) {
+            return done("failed", `A new session's request can be at most ${SESSION_REQUEST_MAX.toLocaleString()} characters ` +
+                `(this one is ${text.length.toLocaleString()} with its attachments). Remove an attachment or shorten it.`);
+        }
+        if (project !== this.state.project)
+            return done("cancelled"); // switched away meanwhile
+        try {
+            await this.client.startSession(project.id, { kind, request: text });
+        }
+        catch (err) {
+            return done("failed", errorText(err));
+        }
+        this.attachments = this.attachments.filter((a) => !sending.includes(a));
+        done("started");
+        this.post({ type: "toast", level: "ok", text: "New session started" });
+        // Onto the new session: its own history, stream and state - as reopening the project shows it.
+        const gen = ++this.generation;
+        this.stopProject();
+        await this.loadProject(project.id, gen);
+        return true;
     }
     async answer(m) {
         const project = this.state.project;
@@ -1042,6 +1290,24 @@ class ChatViewProvider {
         this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
         this.state.artifacts = this.artifacts.build({ ...this.state, stages: this.state.stages });
         this.post({ type: "state", state: this.state });
+        this.syncContextKeys();
+    }
+    /** Mirror the state into the context keys the view title's actions depend on. */
+    syncContextKeys() {
+        const s = this.state;
+        const hasProject = s.mode === "project" && Boolean(s.project);
+        const connected = s.connection === "connected";
+        const keys = {
+            "neo.hasProject": hasProject,
+            "neo.busy": hasProject && connected && s.busy && !s.stopping,
+            "neo.sessionDone": hasProject && connected && !s.busy && s.phase === "done",
+        };
+        for (const key of Object.keys(keys)) {
+            if (this.contextKeys[key] === keys[key])
+                continue;
+            this.contextKeys[key] = keys[key];
+            void vscode.commands.executeCommand("setContext", key, keys[key]);
+        }
     }
     post(message) {
         void this.view?.webview.postMessage(message);
@@ -1164,6 +1430,7 @@ class ChatViewProvider {
         </button>
         <button id="send" type="submit" class="send" title="Send (Ctrl+Enter)" aria-label="Send">
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>
+          <span class="send-label">New session</span>
         </button>
       </div>
     </div>

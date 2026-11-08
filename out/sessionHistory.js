@@ -31,6 +31,8 @@ exports.awaySummary = awaySummary;
 exports.describeNow = describeNow;
 exports.formatTime = formatTime;
 exports.mdInline = mdInline;
+exports.sessionState = sessionState;
+exports.sessionStateLabel = sessionStateLabel;
 exports.sessionMarkdown = sessionMarkdown;
 exports.historyBlocks = historyBlocks;
 // --- labels ------------------------------------------------------------------------------
@@ -361,23 +363,48 @@ function clipText(text, limit) {
 }
 // chat.js / context.ts put attached files after this line; the viewer shows the user's own words.
 const CONTEXT_MARKER = "\n\n--- Attached from VS Code ---\n";
+function sessionState(i) {
+    if (i.current) {
+        if (i.phase === "done" || i.reachedDone)
+            return "completed";
+        if (i.busy)
+            return "running";
+        if (i.waiting)
+            return "waiting for you";
+        return "in progress";
+    }
+    return i.reachedDone ? "completed" : "ended";
+}
+/** "completed · current", "running · current", "completed", "ended". */
+function sessionStateLabel(state, current) {
+    return current ? `${state} · current` : state;
+}
+/** "**Current** · completed · the session the NEO sidebar follows", "Completed", "Ended". */
+function statusCell(input) {
+    const state = input.state ?? (input.active ? undefined : input.session.ended_at ? "ended" : undefined);
+    if (input.active)
+        return `**Current**${state ? ` · ${state}` : ""} · the session the NEO sidebar follows`;
+    if (!state)
+        return "Not current";
+    return state[0].toUpperCase() + state.slice(1);
+}
 /** One session as a read-only Markdown document: what was asked, how it went, its history. */
 function sessionMarkdown(input) {
     const { session: s, stages } = input;
     const out = [];
     out.push(`# ${mdInline(s.title || "Session")}`);
     out.push(`> **Read-only snapshot** of NEO's stored history, read ${formatTime(input.takenAt)}. ` +
-        "Viewing it does not change the active session, restart any work, or modify the project. " +
-        "To act on the project, use the NEO sidebar.");
+        "Viewing it does not change the current session, restart any work, or modify the project. " +
+        "To act on the project, use the NEO sidebar - it stays on the current session.");
     out.push([
         "| | |",
         "|---|---|",
         `| Project | ${mdInline(input.projectName)} |`,
         `| Session | ${input.index} of ${input.count} |`,
         `| Type | ${mdInline(kindLabel(s.kind, input.kinds))} |`,
-        `| Status | ${input.active ? "**Active** · the session the NEO sidebar follows" : s.ended_at ? "Ended" : "Not active"} |`,
+        `| Status | ${statusCell(input)} |`,
         `| Started | ${formatTime(s.created_at)} |`,
-        `| Ended | ${s.ended_at ? formatTime(s.ended_at) : input.active ? "— (still active)" : "—"} |`,
+        `| Ended | ${s.ended_at ? formatTime(s.ended_at) : input.active ? "— (current session)" : "—"} |`,
         ...(typeof s.messages === "number" ? [`| Messages | ${s.messages} |`] : []),
         `| Stored events | ${input.total} |`,
     ].join("\n"));

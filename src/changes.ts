@@ -24,6 +24,11 @@ const SCHEME = "neo-changes";
 
 // Phases in which there is work to show. Before Execute there is no worktree and nothing changed.
 const RELEVANT = new Set(["execute", "review", "review-gate", "finish", "done"]);
+
+/** Whether NEO's work in this phase has changes to show (from Execute on). */
+export function changesPhase(phase: string | undefined): boolean {
+  return Boolean(phase && RELEVANT.has(phase));
+}
 // How often a live view is recomputed (the sidebar posts state many times a second while NEO
 // streams); a finished one hardly ever changes.
 const LIVE_INTERVAL_MS = 5_000;
@@ -271,6 +276,12 @@ export class ChangesController implements vscode.Disposable {
     void this.run();
   }
 
+  /** The changes last computed for this project, or null while there are none (yet). */
+  current(projectPath: string | undefined): ChangesSnapshot | null {
+    const s = this.snapshot;
+    return s && projectPath && normalizePath(s.project) === normalizePath(projectPath) ? s : null;
+  }
+
   /** Handles "changes.*" messages; true if it was one. */
   async onMessage(m: ChangesMessage): Promise<boolean> {
     switch (m.type) {
@@ -330,7 +341,7 @@ export class ChangesController implements vscode.Disposable {
 
   // --- diffs and files ------------------------------------------------------------------------
 
-  private async openDiff(rel: string): Promise<void> {
+  async openDiff(rel: string): Promise<void> {
     const s = this.snapshot;
     const f = s?.files.find((x) => x.path === rel);
     if (!s || !f || !s.repo || !s.baseRef) {

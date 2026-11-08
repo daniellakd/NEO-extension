@@ -53,11 +53,36 @@ The sidebar shows **Connected** when NEO is reachable. If it is not, start NEO a
   message box repeats the current phase and says whether NEO is working or waiting on you.
 - **Gates:** when NEO reaches a gate, a card shows the document and its checks, with **Approve**
   and **Request Changes**.
-- **Header actions:** **Projects** (switches the sidebar to another NEO project), **New Project**
-  and **Web UI** (opens the NEO web UI on the current project).
+- **Header actions** (the icons at the top of the sidebar; they follow the project's state):
+  - **Stop Current Work** - only while NEO is running something.
+  - **Start New Session** - only when the current session is Done.
+  - **Sessions** - when a project is open. **New Project** - when none is.
+  - **Projects** - always: switches the sidebar to another NEO project.
+  - The **…** menu has the rest: Go to…, Open Design, Open Plan, Open Current Changes, Refresh,
+    Open Web UI, New Project, Connect and Open Settings.
 
-Commands are also available from the Command Palette: `NEO: Connect`, `NEO: Refresh`,
-`NEO: New Project`, `NEO: Projects`, `NEO: Sessions` and `NEO: Open in Browser`.
+## Commands
+
+Every action is in the Command Palette (Ctrl+Shift+P, type `NEO`). Each one acts on the project
+shown in the sidebar and its **current** session; when it cannot act right now (no project, nothing
+running, no plan in this session…) it says why.
+
+| Command | What it does |
+| --- | --- |
+| `NEO: Go to…` | One list of where you can go now: the current session (the chat), Design, Plan, Changes, Sessions - each with where it stands (`Plan · task 3 of 8`, `Changes · 4 files`). |
+| `NEO: Open Design` / `NEO: Open Plan` | The current session's document, as the chip's **Preview** opens it (read-only Markdown preview). A Quick change session has neither. |
+| `NEO: Open Current Changes` | The files the **Changes** strip lists; pick one to open its read-only diff. From Execute on. |
+| `NEO: Stop Current Work` | The chat's **Stop**: NEO's own abort of the running turn. Says so when nothing is running. |
+| `NEO: Sessions` | Every session of the project; one picked opens as a read-only snapshot. |
+| `NEO: Start New Session` | New work once the current session is Done (Full pipeline, Quick plan or Quick change). |
+| `NEO: Projects` / `NEO: New Project` | Switch the sidebar to another project / create one in the open folder. |
+| `NEO: Refresh` / `NEO: Connect` | Re-read the project / reconnect to NEO. |
+| `NEO: Open Web UI` | The NEO web UI on the current project. |
+| `NEO: Open Settings` | VS Code Settings for this extension (`neo.serverUrl`). |
+| `NEO: Add Context to Message…`, `NEO: Add Current File to Message`, `NEO: Add Selection to Message` | See below. |
+
+No keyboard shortcuts are added. To bind one, use **Preferences: Open Keyboard Shortcuts** and
+search `NEO` - `NEO: Go to…` and `NEO: Focus on Chat View` are good candidates.
 
 ## Adding context to a message
 

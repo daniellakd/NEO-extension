@@ -41,6 +41,8 @@ const sessionHistory_1 = require("./sessionHistory");
  * own URI and nothing else, so looking at an old session can never make it active or start work.
  */
 exports.SCHEME = "neo-session";
+// The picker's "Start new session…" entry: not a session id NEO could ever issue.
+const NEW_SESSION = "__new_session__";
 // The most events read to cover a long absence (NEO's own cap for one history read).
 const GAP_READ = 2000;
 // The unseen buffer's bound; past it the summary says its counts are minimums.
@@ -56,6 +58,9 @@ class SessionsController {
     kinds = {};
     gateEvents = [];
     hiddenEarlier = 0;
+    /** Whether an ended session reached Done, by session id: NEO's phase marks, read once each. */
+    reachedDone = new Map();
+    lookingUp = null;
     // Since you were away.
     anchor;
     /** The unseen buffer is complete enough to summarise. Until then nothing is marked as seen. */
@@ -156,6 +161,7 @@ class SessionsController {
         if (Array.isArray(d.sessions)) {
             this.sessions = d.sessions.map(slimSession);
             this.activeId = d.session_id ?? this.sessions[this.sessions.length - 1]?.id ?? null;
+            void this.lookUpCompletion();
         }
         if (Array.isArray(d.gate_events)) {
             this.gateEvents = d.gate_events.map((g) => ({ phase: g.phase, action: g.action, feedback: g.feedback, created_at: g.created_at }));
@@ -267,12 +273,18 @@ class SessionsController {
             void vscode.window.showInformationMessage("NEO has no sessions recorded for this project yet.");
             return;
         }
-        const active = list[list.length - 1].id;
+        // Which earlier sessions finished, before saying so.
+        await this.lookUpCompletion(list);
+        if (projectId !== this.projectId)
+            return;
+        const current = list[list.length - 1].id;
         const items = list
             .map((s, i) => {
-            const isActive = s.id === active;
-            const state = isActive ? "active" : s.ended_at ? `ended ${shortTime(s.ended_at)}` : "not active";
+            const isCurrent = s.id === current;
+            const state = this.stateOf(s, isCurrent);
             const facts = [`started ${shortTime(s.created_at)}`];
+            if (s.ended_at)
+                facts.push(`ended ${shortTime(s.ended_at)}`);
             if (typeof s.messages === "number")
                 facts.push(`${s.messages} message${s.messages === 1 ? "" : "s"}`);
             const request = firstLine(s.request);
@@ -280,20 +292,80 @@ class SessionsController {
                 facts.push(request);
             return {
                 id: s.id,
-                label: `${isActive ? "$(circle-filled)" : "$(history)"} ${s.title}`,
-                description: `${i + 1} of ${list.length} · ${(0, sessionHistory_1.kindLabel)(s.kind, this.kinds)} · ${state}`,
+                label: `${isCurrent ? "$(circle-filled)" : "$(history)"} ${s.title}`,
+                description: `${i + 1} of ${list.length} · ${(0, sessionHistory_1.kindLabel)(s.kind, this.kinds)} · ${(0, sessionHistory_1.sessionStateLabel)(state, isCurrent)}`,
                 detail: facts.join(" · "),
             };
         })
             .reverse();
+        // When the current session is complete, the next step is new work: offer it first.
+        if (this.stateOf(list[list.length - 1], true) === "completed") {
+            items.unshift({
+                id: NEW_SESSION,
+                label: "$(add) Start new session…",
+                description: "new work on this project",
+                detail: "Earlier sessions stay here as read-only history.",
+            });
+        }
         const picked = await vscode.window.showQuickPick(items, {
             title: "NEO sessions",
-            placeHolder: "Open a session as a read-only snapshot (the active session is not changed)",
+            placeHolder: "Open a session as a read-only snapshot (the sidebar stays on the current session)",
             matchOnDescription: true,
             matchOnDetail: true,
         });
-        if (picked)
+        if (!picked)
+            return;
+        if (picked.id === NEW_SESSION)
+            await this.host.startSession();
+        else
             await this.openSnapshot(picked.id);
+    }
+    /**
+     * Whether each ended session reached Done: NEO's phase marks for that session, read once. Only
+     * GET reads, scoped by `session=`, so nothing about the current session changes. A read that
+     * fails leaves the session "ended", which is all that is then known.
+     */
+    lookUpCompletion(list = this.sessions) {
+        if (this.lookingUp)
+            return this.lookingUp;
+        const projectId = this.projectId;
+        const todo = (list ?? []).filter((s) => s.ended_at && !this.reachedDone.has(s.id));
+        if (!projectId || !todo.length)
+            return Promise.resolve();
+        this.lookingUp = (async () => {
+            let learnt = false;
+            try {
+                for (const s of todo) {
+                    try {
+                        const d = await this.host.client().project(projectId, 1, s.id);
+                        if (projectId !== this.projectId)
+                            return;
+                        this.reachedDone.set(s.id, Object.prototype.hasOwnProperty.call(d.phase_marks ?? {}, "done"));
+                        learnt = true;
+                    }
+                    catch {
+                        // Unreadable now: asked again at the next project read.
+                    }
+                }
+            }
+            finally {
+                this.lookingUp = null;
+                if (learnt && projectId === this.projectId)
+                    this.host.changed();
+            }
+        })();
+        return this.lookingUp;
+    }
+    stateOf(s, current) {
+        const now = this.host.status();
+        return (0, sessionHistory_1.sessionState)({
+            current,
+            endedAt: s.ended_at ?? null,
+            reachedDone: this.reachedDone.get(s.id),
+            phase: current ? now.phase : undefined,
+            busy: current && now.busy,
+            waiting: current && now.waiting,
+        });
     }
     /** The read-only document for one session, in the Markdown preview. */
     async openSnapshot(sessionId) {
@@ -327,12 +399,23 @@ class SessionsController {
             const index = all.findIndex((s) => s.id === sessionId);
             if (index < 0)
                 return "# Session unavailable\n\nNEO has no such session in this project.\n";
+            const current = index === all.length - 1;
+            // From this read alone: its own phase marks, and - for the current one - the project's state.
+            const state = (0, sessionHistory_1.sessionState)({
+                current,
+                endedAt: all[index].ended_at ?? null,
+                reachedDone: Object.prototype.hasOwnProperty.call(detail.phase_marks ?? {}, "done"),
+                phase: current ? detail.phase : undefined,
+                busy: current && Boolean(detail.busy),
+                waiting: current && Boolean(detail.awaiting_answer || detail.at_gate),
+            });
             return (0, sessionHistory_1.sessionMarkdown)({
                 projectName: detail.project?.name ?? projectId,
                 session: all[index],
                 index: index + 1,
                 count: all.length,
-                active: index === all.length - 1,
+                active: current,
+                state,
                 kinds: listed.kinds,
                 events: detail.history ?? [],
                 total: detail.history_total ?? (detail.history ?? []).length,
@@ -358,6 +441,7 @@ class SessionsController {
             endedAt: s.ended_at ?? null,
             firstEvent: typeof s.first_event === "number" ? s.first_event : null,
             active: s.id === this.activeId,
+            state: this.stateOf(s, s.id === this.activeId),
         };
     }
     /** Write the anchor soon: at most once a second while events stream past. */

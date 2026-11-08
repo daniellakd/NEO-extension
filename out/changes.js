@@ -24,6 +24,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ChangesController = void 0;
+exports.changesPhase = changesPhase;
 exports.worktrees = worktrees;
 exports.computeChanges = computeChanges;
 const child_process_1 = require("child_process");
@@ -49,6 +50,10 @@ const workspace_1 = require("./workspace");
 const SCHEME = "neo-changes";
 // Phases in which there is work to show. Before Execute there is no worktree and nothing changed.
 const RELEVANT = new Set(["execute", "review", "review-gate", "finish", "done"]);
+/** Whether NEO's work in this phase has changes to show (from Execute on). */
+function changesPhase(phase) {
+    return Boolean(phase && RELEVANT.has(phase));
+}
 // How often a live view is recomputed (the sidebar posts state many times a second while NEO
 // streams); a finished one hardly ever changes.
 const LIVE_INTERVAL_MS = 5_000;
@@ -246,6 +251,11 @@ class ChangesController {
         this.key = key;
         this.projectPath = project.path;
         void this.run();
+    }
+    /** The changes last computed for this project, or null while there are none (yet). */
+    current(projectPath) {
+        const s = this.snapshot;
+        return s && projectPath && (0, workspace_1.normalizePath)(s.project) === (0, workspace_1.normalizePath)(projectPath) ? s : null;
     }
     /** Handles "changes.*" messages; true if it was one. */
     async onMessage(m) {
