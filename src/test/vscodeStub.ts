@@ -48,7 +48,14 @@ export const stubState: {
   inputBox: string | undefined;
   /** Every information message shown, in order. */
   infos: string[];
-} = { folders: [], serverUrl: "http://127.0.0.1:0", quickPick: null, commands: [], focused: true, inputBox: undefined, infos: [] };
+  /** Every warning message shown, in order. */
+  warnings: string[];
+  /** Commands registered through vscode.commands.registerCommand, by id. */
+  registered: Map<string, (...args: unknown[]) => unknown>;
+} = {
+  folders: [], serverUrl: "http://127.0.0.1:0", quickPick: null, commands: [], focused: true, inputBox: undefined, infos: [],
+  warnings: [], registered: new Map(),
+};
 
 const vscode = {
   Uri,
@@ -71,7 +78,7 @@ const vscode = {
     onDidChangeWindowState: event(),
     showInformationMessage: async (m: string) => void stubState.infos.push(m),
     showInputBox: async () => stubState.inputBox,
-    showWarningMessage: async () => undefined,
+    showWarningMessage: async (m: string) => void stubState.warnings.push(m),
     showErrorMessage: async () => undefined,
     showQuickPick: async (items: { id?: string }[]) => (stubState.quickPick ? stubState.quickPick(items) : undefined),
     showTextDocument: async () => undefined,
@@ -99,7 +106,10 @@ const vscode = {
     },
   },
   commands: {
-    registerCommand: disposable,
+    registerCommand: (id: string, run: (...args: unknown[]) => unknown) => {
+      stubState.registered.set(id, run);
+      return { dispose: () => stubState.registered.delete(id) };
+    },
     executeCommand: async (id: string, ...args: unknown[]) => {
       stubState.commands.push({ id, args });
       return undefined;

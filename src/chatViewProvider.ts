@@ -37,8 +37,9 @@ import {
   stopExplains,
   touchesPlan,
 } from "./progress";
-import { ChangesController, ChangesMessage } from "./changes";
-import { ArtifactsView, PlanArtifacts, PlanMessage, StageLike } from "./plan";
+import { ChangesController, ChangesMessage, changesPhase } from "./changes";
+import { ArtifactView, ArtifactsView, PlanArtifacts, PlanMessage, StageLike } from "./plan";
+import { kindLabel, sessionStateLabel } from "./sessionHistory";
 import { SessionsController, SessionsMessage, SessionsView } from "./sessions";
 import { SseStream } from "./sseStream";
 import { currentFolder, neoSlug, normalizePath, projectForFolder, samePath } from "./workspace";
@@ -72,6 +73,19 @@ const DONE_REFUSAL =
   "session with it - the completed one stays as read-only history.";
 
 type Connection = "connecting" | "connected" | "unreachable";
+
+/**
+ * Context keys for the view title's state-dependent actions (package.json `when` clauses). Only the
+ * title bar uses them; every command stays in the Command Palette and says why when it cannot act.
+ */
+export interface NeoContextKeys {
+  /** A NEO project is shown in the sidebar. */
+  "neo.hasProject": boolean;
+  /** NEO is running a turn on it that Stop can end (and no Stop is already under way). */
+  "neo.busy": boolean;
+  /** Its current session reached Done, so a new session can start. */
+  "neo.sessionDone": boolean;
+}
 type Mode = "loading" | "noFolder" | "noProject" | "project";
 
 interface ViewState {
@@ -181,6 +195,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private artifacts = new PlanArtifacts();
   // NEO's sessions, "since you were away", and the read-only session snapshots (src/sessions.ts).
   private sessions: SessionsController;
+  // The context keys last set, so each is only sent to VS Code when it changes.
+  private contextKeys: Partial<NeoContextKeys> = {};
 
   constructor(private readonly extensionUri: vscode.Uri, store?: vscode.Memento) {
     this.client = new NeoClient(serverUrl());
@@ -470,6 +486,157 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     const id = this.state.project?.id;
     const url = this.client.baseUrl + (id ? `/?project=${encodeURIComponent(id)}` : "/");
     void vscode.env.openExternal(vscode.Uri.parse(url));
+  }
+
+  // --- commands: reaching what the sidebar already shows ----------------------------------
+  //
+  // Each one only opens or ends what the sidebar itself offers (the Stop button, a chip's Preview,
+  // the Changes strip, NEO: Sessions), through the same code. None of them loads, switches or
+  // starts a session, so looking at anything never changes the current one.
+
+  /** The project the commands act on, or undefined after saying there is none. */
+  private commandProject(): { id: string; name: string; path: string } | undefined {
+    if (this.state.mode === "project" && this.state.project) return this.state.project;
+    void vscode.window.showInformationMessage("NEO: open a NEO project first (NEO: Projects, or NEO: New Project).");
+    return undefined;
+  }
+
+  /** NEO: Stop Current Work - the sidebar's own Stop. Nothing to stop is said, not ignored. */
+  async stopCurrentWork(): Promise<void> {
+    const project = this.commandProject();
+    if (!project) return;
+    if (this.state.stopping) {
+      void vscode.window.showInformationMessage(`NEO: already stopping the current work on ${project.name}.`);
+      return;
+    }
+    if (!this.state.busy) {
+      void vscode.window.showInformationMessage(`NEO: nothing is running on ${project.name} right now.`);
+      return;
+    }
+    // The chat is where "stopping…" and then "stopped" are reported.
+    await vscode.commands.executeCommand(`${ChatViewProvider.viewId}.focus`);
+    await this.abort();
+  }
+
+  /** NEO: Open Design / NEO: Open Plan - the current session's document, as the chip's Preview opens it. */
+  async openDocument(kind: "design" | "plan"): Promise<void> {
+    const project = this.commandProject();
+    if (!project) return;
+    const outcome = await this.artifacts.openKind(
+      kind === "plan" ? "plan" : "document",
+      this.state.stages as StageLike[],
+      async (items) =>
+        (await vscode.window.showQuickPick(
+          items.map((i) => ({ item: i, label: i.label, description: `${i.path} · ${i.status}` })),
+          { title: "NEO: Open Design", placeHolder: "Which document of the current session?" },
+        ))?.item,
+    );
+    if (outcome === "none") {
+      const sessionKind = this.state.sessions?.active?.kind;
+      const what = sessionKind ? `it is a ${kindLabel(sessionKind)} session, which` : "this session";
+      void vscode.window.showInformationMessage(
+        `NEO: the current session of ${project.name} has no ${kind}: ${what} does not go through a ${kind} step.`,
+      );
+    } else if (outcome === "pending") {
+      void vscode.window.showInformationMessage(
+        `NEO: no ${kind} yet in the current session of ${project.name}. It can be opened once NEO has written it.`,
+      );
+    }
+  }
+
+  /** NEO: Open Current Changes - the Changes strip's files; one picked opens its native diff. */
+  async openChanges(): Promise<void> {
+    const project = this.commandProject();
+    if (!project) return;
+    const info = (m: string) => void vscode.window.showInformationMessage(`NEO: ${m}`);
+    if (!changesPhase(this.state.phase)) {
+      info(`no changes yet on ${project.name}. NEO's changes are listed from Execute on.`);
+      return;
+    }
+    const snap = this.changes.current(project.path);
+    if (!snap) {
+      info("still reading the changes. Try again in a moment.");
+      return;
+    }
+    if (snap.error) {
+      void vscode.window.showWarningMessage(`NEO: could not read the changes: ${snap.error}`);
+      return;
+    }
+    if (!snap.files.length) {
+      info(`no files changed${snap.label ? ` (${snap.label})` : ""}.`);
+      return;
+    }
+    const count = (n: number | null, sign: string) => (n === null ? "binary" : `${sign}${n}`);
+    const picked = await vscode.window.showQuickPick(
+      snap.files.map((f) => ({
+        path: f.path,
+        label: path.posix.basename(f.path),
+        description: `${f.untracked ? "U" : f.status} · ${count(f.additions, "+")} ${count(f.deletions, "−")}`,
+        detail: f.oldPath ? `${f.oldPath} → ${f.path}` : f.path,
+      })),
+      {
+        title: `NEO: Changes${snap.label ? ` · ${snap.label}` : ""}`,
+        placeHolder:
+          `${snap.files.length} changed file${snap.files.length === 1 ? "" : "s"}${snap.truncated ? " (list truncated)" : ""}` +
+          " - pick one to open its read-only diff",
+        matchOnDetail: true,
+      },
+    );
+    if (picked) await this.changes.openDiff(picked.path);
+  }
+
+  /** NEO: Go to… - the places the current project has right now, with where each stands. */
+  async goTo(): Promise<void> {
+    const project = this.commandProject();
+    if (!project) return;
+    type Item = vscode.QuickPickItem & { go: () => Thenable<unknown> };
+    const items: Item[] = [];
+    const active = this.state.sessions?.active;
+    items.push({
+      label: "$(comment-discussion) Current session",
+      description: active ? `${active.title} · ${kindLabel(active.kind)} · ${sessionStateLabel(active.state, true)}` : project.name,
+      detail: "Show the NEO chat",
+      go: () => vscode.commands.executeCommand(`${ChatViewProvider.viewId}.focus`),
+    });
+    const describe = (i: ArtifactView) =>
+      i.kind === "plan" && i.current
+        ? `task ${i.current.index} of ${i.current.total}`
+        : i.atGate ? "awaiting your approval" : i.status === "changes" ? "changes requested" : i.status;
+    const seen = new Set<string>();
+    for (const doc of this.artifacts.current()) {
+      const kind = doc.kind === "plan" ? "plan" : "design";
+      if (seen.has(kind)) continue;               // Open Design asks which, if there are several
+      seen.add(kind);
+      items.push({
+        label: `${kind === "plan" ? "$(checklist)" : "$(book)"} ${doc.label}`,
+        description: describe(doc),
+        detail: `${doc.path} - read-only preview`,
+        go: () => this.openDocument(kind),
+      });
+    }
+    if (changesPhase(this.state.phase)) {
+      const snap = this.changes.current(project.path);
+      const n = snap ? snap.files.length : 0;
+      items.push({
+        label: "$(diff) Changes",
+        description: snap ? `${n} file${n === 1 ? "" : "s"}` : "reading…",
+        detail: "Open a changed file's diff",
+        go: () => this.openChanges(),
+      });
+    }
+    const count = this.state.sessions?.list.length;
+    items.push({
+      label: "$(history) Sessions",
+      description: count ? `${count} session${count === 1 ? "" : "s"}` : undefined,
+      detail: "Open a session as a read-only snapshot",
+      go: () => this.showSessions(),
+    });
+    const picked = await vscode.window.showQuickPick(items, {
+      title: `NEO: Go to · ${project.name}`,
+      placeHolder: "Where to?",
+      matchOnDescription: true,
+    });
+    if (picked) await picked.go();
   }
 
   // --- project lifecycle ------------------------------------------------------------------
@@ -1207,6 +1374,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
     this.state.artifacts = this.artifacts.build({ ...this.state, stages: this.state.stages as StageLike[] });
     this.post({ type: "state", state: this.state });
+    this.syncContextKeys();
+  }
+
+  /** Mirror the state into the context keys the view title's actions depend on. */
+  private syncContextKeys(): void {
+    const s = this.state;
+    const hasProject = s.mode === "project" && Boolean(s.project);
+    const connected = s.connection === "connected";
+    const keys: NeoContextKeys = {
+      "neo.hasProject": hasProject,
+      "neo.busy": hasProject && connected && s.busy && !s.stopping,
+      "neo.sessionDone": hasProject && connected && !s.busy && s.phase === "done",
+    };
+    for (const key of Object.keys(keys) as (keyof NeoContextKeys)[]) {
+      if (this.contextKeys[key] === keys[key]) continue;
+      this.contextKeys[key] = keys[key];
+      void vscode.commands.executeCommand("setContext", key, keys[key]);
+    }
   }
 
   private post(message: Record<string, unknown>): void {

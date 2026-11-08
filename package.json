@@ -54,7 +54,7 @@
       },
       {
         "command": "neo.openInBrowser",
-        "title": "Open in Browser",
+        "title": "Open Web UI",
         "category": "NEO",
         "icon": "$(link-external)"
       },
@@ -75,6 +75,38 @@
         "title": "Start New Session",
         "category": "NEO",
         "icon": "$(add)"
+      },
+      {
+        "command": "neo.stop",
+        "title": "Stop Current Work",
+        "category": "NEO",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "neo.goTo",
+        "title": "Go to…",
+        "category": "NEO"
+      },
+      {
+        "command": "neo.openDesign",
+        "title": "Open Design",
+        "category": "NEO"
+      },
+      {
+        "command": "neo.openPlan",
+        "title": "Open Plan",
+        "category": "NEO"
+      },
+      {
+        "command": "neo.openChanges",
+        "title": "Open Current Changes",
+        "category": "NEO"
+      },
+      {
+        "command": "neo.openSettings",
+        "title": "Open Settings",
+        "category": "NEO",
+        "icon": "$(gear)"
       },
       {
         "command": "neo.addContext",
@@ -102,34 +134,74 @@
       ],
       "view/title": [
         {
-          "command": "neo.newProject",
-          "when": "view == neo.chat",
+          "command": "neo.stop",
+          "when": "view == neo.chat && neo.busy",
           "group": "navigation@1"
         },
         {
-          "command": "neo.openInBrowser",
-          "when": "view == neo.chat",
+          "command": "neo.startSession",
+          "when": "view == neo.chat && neo.sessionDone",
           "group": "navigation@2"
         },
         {
-          "command": "neo.switchProject",
-          "when": "view == neo.chat",
+          "command": "neo.newProject",
+          "when": "view == neo.chat && !neo.hasProject",
           "group": "navigation@3"
         },
         {
           "command": "neo.sessions",
-          "when": "view == neo.chat",
+          "when": "view == neo.chat && neo.hasProject",
           "group": "navigation@4"
         },
         {
-          "command": "neo.refresh",
+          "command": "neo.switchProject",
           "when": "view == neo.chat",
           "group": "navigation@5"
         },
         {
+          "command": "neo.goTo",
+          "when": "view == neo.chat",
+          "group": "1_navigate@1"
+        },
+        {
+          "command": "neo.openDesign",
+          "when": "view == neo.chat",
+          "group": "1_navigate@2"
+        },
+        {
+          "command": "neo.openPlan",
+          "when": "view == neo.chat",
+          "group": "1_navigate@3"
+        },
+        {
+          "command": "neo.openChanges",
+          "when": "view == neo.chat",
+          "group": "1_navigate@4"
+        },
+        {
+          "command": "neo.refresh",
+          "when": "view == neo.chat",
+          "group": "2_project@1"
+        },
+        {
+          "command": "neo.openInBrowser",
+          "when": "view == neo.chat",
+          "group": "2_project@2"
+        },
+        {
+          "command": "neo.newProject",
+          "when": "view == neo.chat && neo.hasProject",
+          "group": "2_project@3"
+        },
+        {
           "command": "neo.connect",
           "when": "view == neo.chat",
-          "group": "overflow"
+          "group": "3_neo@1"
+        },
+        {
+          "command": "neo.openSettings",
+          "when": "view == neo.chat",
+          "group": "3_neo@2"
         }
       ]
     },

@@ -279,6 +279,31 @@ export class PlanArtifacts {
     return { items };
   }
 
+  /** The documents of the session being shown, as last built (what the chips show). */
+  current(): readonly ArtifactView[] {
+    return this.items;
+  }
+
+  /**
+   * Open a document by what it is - the plan, or a design (any other document gate) - for the
+   * commands. The same read-only preview as the chip's Preview. When there is nothing to open the
+   * reason is returned instead, from NEO's own stage list: no such step in this session (a quick
+   * change), or not written yet.
+   */
+  async openKind(kind: "plan" | "document", stages: StageLike[], pick?: (items: ArtifactView[]) => Promise<ArtifactView | undefined>): Promise<"opened" | "cancelled" | "none" | "pending"> {
+    const items = this.items.filter((i) => i.kind === kind);
+    if (!items.length) {
+      // No stage list at all says nothing about the session's steps: only "not yet".
+      if (!stages || !stages.length) return "pending";
+      const gates = documentGates(stages).filter((g) => (isPlanGate(g) ? "plan" : "document") === kind);
+      return gates.length ? "pending" : "none";
+    }
+    const item = items.length > 1 && pick ? await pick(items) : items[0];
+    if (!item) return "cancelled";
+    await this.open(item, "preview");
+    return "opened";
+  }
+
   /** Handles "plan.*" messages; true if it was one. */
   async onMessage(m: PlanMessage): Promise<boolean> {
     if (m.type !== "plan.open") return m.type.startsWith("plan.");

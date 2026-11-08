@@ -27,6 +27,7 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const chatViewProvider_1 = require("./chatViewProvider");
+const commands_1 = require("./commands");
 /**
  * NEO: a sidebar chat over the local NEO-AG orchestrator. The extension never starts NEO and
  * never runs any part of its pipeline; it reads NEO's state and forwards the user's actions.
@@ -39,21 +40,9 @@ function activate(context) {
         // The transcript is rebuilt from the host on reload, but keeping it alive avoids a redraw —
         // and losing a half-typed gate reason — every time the sidebar is switched away from.
         webviewOptions: { retainContextWhenHidden: true },
-    }), vscode.commands.registerCommand("neo.connect", () => provider.connect()), vscode.commands.registerCommand("neo.refresh", () => provider.refresh()), vscode.commands.registerCommand("neo.newProject", async () => {
-        await vscode.commands.executeCommand(`${chatViewProvider_1.ChatViewProvider.viewId}.focus`);
-        provider.showNewProject();
-    }), vscode.commands.registerCommand("neo.openInBrowser", () => provider.openInBrowser()), vscode.commands.registerCommand("neo.switchProject", () => provider.switchProject()), 
-    // The open project's sessions; one picked opens read-only and the active session is unchanged.
-    vscode.commands.registerCommand("neo.sessions", () => provider.showSessions()), 
-    // Context for the next message. Each reveals the chat, where the chip it made is shown.
-    ...[
-        ["neo.addContext", "menu"],
-        ["neo.addCurrentFile", "file"],
-        ["neo.addSelection", "selection"],
-    ].map(([id, source]) => vscode.commands.registerCommand(id, async () => {
-        await vscode.commands.executeCommand(`${chatViewProvider_1.ChatViewProvider.viewId}.focus`);
-        await provider.addContext(source);
-    })), vscode.workspace.onDidChangeConfiguration((e) => {
+    }), 
+    // Every NEO command (src/commands.ts); the view title shows some of them by state.
+    ...(0, commands_1.registerCommands)(provider), vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration("neo.serverUrl"))
             void provider.connect();
     }), vscode.workspace.onDidChangeWorkspaceFolders(() => void provider.connect()));

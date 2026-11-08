@@ -19,6 +19,8 @@ export interface MockProject {
   /** NEO work sessions, oldest first. Unset: a NEO without sessions (the detail has no `sessions`). */
   sessions?: Record<string, unknown>[];
   gate_events?: Record<string, unknown>[];
+  /** NEO's rail for the current session (unset: none, as before). */
+  stages?: Record<string, unknown>[];
 }
 
 // NEO's SESSION_KINDS (orchestrator phases.py): what each kind is called and the phase it starts in.
@@ -133,7 +135,7 @@ export class MockNeo {
       project: { id: p.id, name: p.name, path: p.path, phase: p.phase, entry_type: "new", idea: "A todo CLI" },
       phase: p.phase, at_gate: p.at_gate, session_id: p.sessions ? chosen ?? null : "ses", gate: p.gate, busy: p.busy, awaiting_answer: p.awaiting_answer,
       pending_request: p.pending_request, needs_attention: p.needs_attention, attention_reason: p.attention_reason,
-      plan_progress: p.plan_progress, stages: [], path_missing: false,
+      plan_progress: p.plan_progress, stages: p.stages ?? [], path_missing: false,
       history: shown, history_total: events.length, history_shown: shown.length,
       ...(p.sessions ? { sessions: p.sessions.map((s) => ({ ...s })), gate_events: p.gate_events ?? [] } : {}),
     };
