@@ -6,20 +6,50 @@
  * origins, so a webview fetch would be refused (and should be).
  */
 
-/** NEO could not be reached at all: nothing was delivered. */
+// Network failures that happen before a request can have been sent: nothing reached NEO.
+const NOT_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT", "ERR_INVALID_URL"]);
+
+/**
+ * NEO answered nothing. For a write this does not always mean nothing was delivered: a timeout or a
+ * reset after the request went out may have left it done on NEO's side (`maybeDelivered`).
+ */
 export class NeoUnreachable extends Error {
-  constructor(public readonly baseUrl: string, cause?: unknown) {
+  /** The network cause, e.g. ECONNREFUSED, ENOTFOUND, TIMEOUT. */
+  readonly code: string | undefined;
+  readonly maybeDelivered: boolean;
+  /** The server URL itself is the likely problem (malformed, or a host name that does not resolve). */
+  readonly config: boolean;
+
+  constructor(public readonly baseUrl: string, cause?: unknown, readonly method = "GET", readonly route = "") {
     super(`NEO not reachable at ${hostOf(baseUrl)}`);
     this.name = "NeoUnreachable";
     if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+    this.code = networkCode(cause);
+    this.maybeDelivered = method !== "GET" && !NOT_SENT.has(this.code ?? "");
+    this.config = this.code === "ERR_INVALID_URL" || this.code === "ENOTFOUND" || !validUrl(baseUrl);
+  }
+
+  /** For "Show details": what was asked, of which server, and why it failed. */
+  technical(): string {
+    const lines = [`${this.method} ${this.baseUrl}${this.route}`, `No response from NEO${this.code ? ` (${this.code})` : ""}.`];
+    const why = causeText((this as { cause?: unknown }).cause);
+    if (why) lines.push(why);
+    return lines.join("\n");
   }
 }
 
 /** NEO answered, and refused. `detail` is FastAPI's `detail`: a string or an object. */
 export class NeoHttpError extends Error {
-  constructor(public readonly status: number, public readonly detail: unknown) {
+  constructor(public readonly status: number, public readonly detail: unknown, readonly method = "", readonly route = "") {
     super(describeDetail(status, detail));
     this.name = "NeoHttpError";
+  }
+
+  /** For "Show details": the status, the route and NEO's whole response. */
+  technical(): string {
+    const head = `HTTP ${this.status}${this.method ? ` · ${this.method} ${this.route}` : ""}`;
+    const body = typeof this.detail === "string" ? this.detail : JSON.stringify(this.detail, null, 2);
+    return body ? `${head}\n${body}` : head;
   }
 }
 
@@ -223,7 +253,7 @@ export class NeoClient {
         signal: AbortSignal.timeout(method === "GET" ? 30_000 : 15 * 60_000),
       });
     } catch (err) {
-      throw new NeoUnreachable(this.baseUrl, err);
+      throw new NeoUnreachable(this.baseUrl, err, method, path);
     }
     const text = await res.text();
     let data: unknown = {};
@@ -236,7 +266,7 @@ export class NeoClient {
     }
     if (!res.ok) {
       const detail = (data as { detail?: unknown }).detail ?? res.statusText;
-      throw new NeoHttpError(res.status, detail);
+      throw new NeoHttpError(res.status, detail, method, path);
     }
     return data as T;
   }
@@ -249,6 +279,33 @@ export function hostOf(baseUrl: string): string {
   } catch {
     return baseUrl;
   }
+}
+
+function validUrl(baseUrl: string): boolean {
+  try {
+    return /^https?:$/.test(new URL(baseUrl).protocol);
+  } catch {
+    return false;
+  }
+}
+
+/** The innermost error code of a failed fetch: Node wraps the socket error as `cause`. */
+function networkCode(err: unknown): string | undefined {
+  for (let e = err, depth = 0; e && typeof e === "object" && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+    const { code, name } = e as { code?: unknown; name?: unknown };
+    if (name === "TimeoutError") return "TIMEOUT";
+    if (typeof code === "string" && code) return code;
+  }
+  return undefined;
+}
+
+function causeText(err: unknown): string {
+  const parts: string[] = [];
+  for (let e = err, depth = 0; e && typeof e === "object" && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+    const message = (e as { message?: unknown }).message;
+    if (typeof message === "string" && message && !parts.includes(message)) parts.push(message);
+  }
+  return parts.join(" ← ");
 }
 
 function enc(id: string): string {

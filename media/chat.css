@@ -615,3 +615,67 @@ button.stop:hover { background: var(--vscode-button-secondaryHoverBackground); }
 }
 .toast.error { border-color: var(--fail); }
 .toast.ok { border-color: var(--pass); }
+
+/* --- onboarding, connection and error details ----------------------------------------------- */
+
+.empty-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  max-width: 280px;
+  text-align: left;
+  font-size: 0.88em;
+}
+.empty-status-line { display: flex; align-items: baseline; gap: 6px; }
+.empty-status-line .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; transform: translateY(-1px); }
+.empty-status-line.ok .dot { background: var(--pass); }
+.empty-status-line.warn .dot { background: var(--warn); }
+.empty-status-text { min-width: 0; overflow-wrap: anywhere; }
+.empty .path { word-break: break-all; }
+.empty-hint { margin: 6px 0 0; max-width: 280px; font-size: 0.88em; color: var(--warn); }
+.empty-problem {
+  margin-top: 12px;
+  max-width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--fail);
+  border-radius: var(--radius);
+  text-align: left;
+  font-size: 0.88em;
+}
+.empty-problem button { margin-top: 6px; }
+.empty .error-details { max-width: 280px; text-align: left; margin-top: 8px; }
+
+.banner.warn { border-color: var(--warn); }
+.banner-head { display: flex; align-items: center; gap: 8px; }
+.banner .buttons { margin-top: 4px; }
+
+.error-hint { margin-top: 3px; color: var(--vscode-foreground); }
+.error-details { margin-top: 6px; font-size: 0.85em; }
+.error-details summary { cursor: pointer; color: var(--muted); }
+.error-details pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--code-bg);
+  border-radius: var(--radius);
+  color: var(--vscode-foreground);
+}
+
+.toast.sticky { pointer-events: auto; position: relative; padding-right: 26px; }
+.toast-hint { margin-top: 2px; opacity: 0.9; }
+.toast-actions { margin-top: 6px; }
+.toast-close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  padding: 0 6px;
+  background: transparent;
+  color: var(--muted);
+}
+.toast-close:hover { color: var(--vscode-foreground); }
+button.icon:disabled { opacity: 0.4; }
+button.icon:disabled:hover { background: transparent; }
