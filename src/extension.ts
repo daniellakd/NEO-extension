@@ -27,6 +27,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("neo.switchProject", () => provider.switchProject()),
     // The open project's sessions; one picked opens read-only and the active session is unchanged.
     vscode.commands.registerCommand("neo.sessions", () => provider.showSessions()),
+    // New work on the open project once its current session is complete (NEO's POST /sessions).
+    vscode.commands.registerCommand("neo.startSession", async () => {
+      await vscode.commands.executeCommand(`${ChatViewProvider.viewId}.focus`);
+      await provider.startSession();
+    }),
     // Context for the next message. Each reveals the chat, where the chip it made is shown.
     ...(
       [

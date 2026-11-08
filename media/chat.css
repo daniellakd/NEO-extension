@@ -574,6 +574,12 @@ button.send {
 }
 button.send:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
 button.send:disabled { opacity: 0.35; }
+/* A completed session: Send starts a new session, and says so in words. */
+.send-label { display: none; }
+.composer.finished button.send { width: auto; gap: 5px; padding: 0 9px; }
+.composer.finished .send-label { display: inline; font-size: 0.85em; white-space: nowrap; }
+/* The button already says what Send does; the hint would only crowd the status out. */
+.composer.finished .send-hint { display: none; }
 button.stop {
   flex: none;
   display: inline-flex;

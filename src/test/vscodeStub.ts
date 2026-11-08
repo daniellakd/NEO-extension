@@ -44,7 +44,11 @@ export const stubState: {
   commands: { id: string; args: unknown[] }[];
   /** Whether the VS Code window has focus. */
   focused: boolean;
-} = { folders: [], serverUrl: "http://127.0.0.1:0", quickPick: null, commands: [], focused: true };
+  /** The answer to an input box (undefined: the user pressed Escape). */
+  inputBox: string | undefined;
+  /** Every information message shown, in order. */
+  infos: string[];
+} = { folders: [], serverUrl: "http://127.0.0.1:0", quickPick: null, commands: [], focused: true, inputBox: undefined, infos: [] };
 
 const vscode = {
   Uri,
@@ -65,7 +69,8 @@ const vscode = {
       return { focused: stubState.focused };
     },
     onDidChangeWindowState: event(),
-    showInformationMessage: async () => undefined,
+    showInformationMessage: async (m: string) => void stubState.infos.push(m),
+    showInputBox: async () => stubState.inputBox,
     showWarningMessage: async () => undefined,
     showErrorMessage: async () => undefined,
     showQuickPick: async (items: { id?: string }[]) => (stubState.quickPick ? stubState.quickPick(items) : undefined),

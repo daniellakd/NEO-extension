@@ -420,6 +420,45 @@ function clipText(text: string, limit: number): string {
 // chat.js / context.ts put attached files after this line; the viewer shows the user's own words.
 const CONTEXT_MARKER = "\n\n--- Attached from VS Code ---\n";
 
+// --- what state a session is in -------------------------------------------------------------
+
+/**
+ * A session's state, from what NEO reports and nothing more.
+ *
+ * NEO ends a session (`ended_at`) only when the next one starts, so a finished build keeps
+ * `ended_at = null` - "the newest" is not "running". The current session's state is the project's:
+ * Done is "completed", a turn in flight "running", a question or a gate "waiting for you". An earlier
+ * session is "completed" when NEO recorded it reaching Done (a `done` phase mark in that session),
+ * and otherwise only "ended": it may have been replaced before it finished.
+ */
+export type SessionState = "completed" | "running" | "waiting for you" | "in progress" | "ended";
+
+export interface SessionStateInput {
+  current: boolean;
+  endedAt: number | null;
+  /** NEO recorded a `done` phase in this session; undefined when not looked up yet. */
+  reachedDone?: boolean;
+  /** The project's phase and turn state: only meaningful for the current session. */
+  phase?: string;
+  busy?: boolean;
+  waiting?: boolean;
+}
+
+export function sessionState(i: SessionStateInput): SessionState {
+  if (i.current) {
+    if (i.phase === "done" || i.reachedDone) return "completed";
+    if (i.busy) return "running";
+    if (i.waiting) return "waiting for you";
+    return "in progress";
+  }
+  return i.reachedDone ? "completed" : "ended";
+}
+
+/** "completed · current", "running · current", "completed", "ended". */
+export function sessionStateLabel(state: SessionState, current: boolean): string {
+  return current ? `${state} · current` : state;
+}
+
 export interface SessionDocInput {
   projectName: string;
   session: NeoSession;
@@ -428,6 +467,8 @@ export interface SessionDocInput {
   count: number;
   /** The session the sidebar follows (the newest). */
   active: boolean;
+  /** Its state (sessionState); absent from callers that do not know it. */
+  state?: SessionState;
   kinds?: Record<string, SessionKind>;
   events: NeoEvent[];
   total: number;
@@ -438,6 +479,14 @@ export interface SessionDocInput {
   takenAt: number;
 }
 
+/** "**Current** · completed · the session the NEO sidebar follows", "Completed", "Ended". */
+function statusCell(input: SessionDocInput): string {
+  const state = input.state ?? (input.active ? undefined : input.session.ended_at ? "ended" : undefined);
+  if (input.active) return `**Current**${state ? ` · ${state}` : ""} · the session the NEO sidebar follows`;
+  if (!state) return "Not current";
+  return state[0].toUpperCase() + state.slice(1);
+}
+
 /** One session as a read-only Markdown document: what was asked, how it went, its history. */
 export function sessionMarkdown(input: SessionDocInput): string {
   const { session: s, stages } = input;
@@ -445,8 +494,8 @@ export function sessionMarkdown(input: SessionDocInput): string {
   out.push(`# ${mdInline(s.title || "Session")}`);
   out.push(
     `> **Read-only snapshot** of NEO's stored history, read ${formatTime(input.takenAt)}. ` +
-      "Viewing it does not change the active session, restart any work, or modify the project. " +
-      "To act on the project, use the NEO sidebar.",
+      "Viewing it does not change the current session, restart any work, or modify the project. " +
+      "To act on the project, use the NEO sidebar - it stays on the current session.",
   );
   out.push(
     [
@@ -455,9 +504,9 @@ export function sessionMarkdown(input: SessionDocInput): string {
       `| Project | ${mdInline(input.projectName)} |`,
       `| Session | ${input.index} of ${input.count} |`,
       `| Type | ${mdInline(kindLabel(s.kind, input.kinds))} |`,
-      `| Status | ${input.active ? "**Active** · the session the NEO sidebar follows" : s.ended_at ? "Ended" : "Not active"} |`,
+      `| Status | ${statusCell(input)} |`,
       `| Started | ${formatTime(s.created_at)} |`,
-      `| Ended | ${s.ended_at ? formatTime(s.ended_at) : input.active ? "— (still active)" : "—"} |`,
+      `| Ended | ${s.ended_at ? formatTime(s.ended_at) : input.active ? "— (current session)" : "—"} |`,
       ...(typeof s.messages === "number" ? [`| Messages | ${s.messages} |`] : []),
       `| Stored events | ${input.total} |`,
     ].join("\n"),

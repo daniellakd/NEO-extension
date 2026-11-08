@@ -8,6 +8,7 @@ import {
   NeoHttpError,
   NeoUnreachable,
   ProjectDetail,
+  SessionKind,
   Stage,
   hostOf,
 } from "./neoClient";
@@ -64,6 +65,11 @@ const IGNORED_KINDS = new Set(["hello", "usage", "reasoning", "permission", "sig
 // How long the sidebar waits for NEO to report the aborted turn ending before it stops saying
 // "stopping". NEO's abort semantics are unchanged; this is only what the panel shows.
 const STOP_SETTLE_MS = 30_000;
+// NEO's POST /sessions takes a request of at most this many characters (app.py SessionIn).
+const SESSION_REQUEST_MAX = 20_000;
+const DONE_REFUSAL =
+  "This session is complete, so the message was not sent into it. Press Send again to start a new " +
+  "session with it - the completed one stays as read-only history.";
 
 type Connection = "connecting" | "connected" | "unreachable";
 type Mode = "loading" | "noFolder" | "noProject" | "project";
@@ -126,7 +132,8 @@ type Inbound =
   | { type: "switchProject" }
   | { type: "openFolder"; path: string }
   | { type: "addContext"; source: ContextSource }
-  | { type: "removeContext"; id: string };
+  | { type: "removeContext"; id: string }
+  | { type: "startSession"; text: string };
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewId = "neo.chat";
@@ -187,6 +194,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       // "Seen" means on screen: the sidebar is visible and the window has focus.
       viewed: () => Boolean(this.view?.visible) && (vscode.window.state?.focused ?? true),
       projectName: () => this.state.project?.name,
+      status: () => ({ phase: this.state.phase, busy: this.state.busy, waiting: this.state.awaiting || this.state.atGate }),
+      startSession: async () => void (await this.startSession()),
     });
     this.trackEditor(vscode.window.activeTextEditor);
     this.disposables.push(
@@ -793,6 +802,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         return this.addContext(m.source);
       case "removeContext":
         return this.removeContext(m.id);
+      case "startSession":
+        await this.startSession(m.text);
+        return;
     }
   }
 
@@ -808,6 +820,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       // The phase is read fresh, as the web UI does: a setup project is started, anything else
       // gets an ordinary message. Which phase follows is NEO's answer, not ours.
       const fresh = await this.client.project(project.id, 1);
+      // A completed session takes no more work: what is sent next must start a new session, never
+      // run inside the finished one. Refused here, text kept, whatever the webview thought.
+      if (fresh.phase === "done") {
+        this.state.phase = fresh.phase;
+        this.postState();
+        this.post({ type: "sendFailed", text: typed, message: DONE_REFUSAL });
+        return;
+      }
       if (fresh.phase === "setup") {
         // This text becomes the project's idea; say so before the kickoff it is wrapped in arrives.
         project.idea = text;
@@ -828,6 +848,103 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     } catch (err) {
       this.post({ type: "sendFailed", text: typed, message: errorText(err) });
     }
+  }
+
+  /**
+   * New work on this project once its current session is complete: NEO's own POST /sessions. The
+   * finished session ends and keeps its history; a new one starts at its kind's first phase; the
+   * sidebar then reloads onto it, exactly as opening the project would.
+   *
+   * `typed` is the message box's text; without it (the command, the Sessions picker) the request is
+   * asked for. Resolves true only once NEO has started the session.
+   */
+  async startSession(typed?: string): Promise<boolean> {
+    const project = this.state.project;
+    const done = (outcome: "started" | "cancelled" | "failed", message?: string) => {
+      this.post({ type: "sessionStart", outcome, message });
+      return outcome === "started";
+    };
+    if (!project || this.state.connection !== "connected") {
+      void vscode.window.showInformationMessage("NEO: open a NEO project first.");
+      return done("cancelled");
+    }
+    let kinds: Record<string, SessionKind>;
+    try {
+      const fresh = await this.client.project(project.id, 1);
+      if (fresh.phase !== "done") {
+        void vscode.window.showInformationMessage(
+          `NEO: the current session of ${project.name} is still in progress (${fresh.phase}). ` +
+            "A new session can start once it is complete.",
+        );
+        return done("cancelled");
+      }
+      kinds = (await this.client.sessions(project.id)).kinds;
+    } catch (err) {
+      return done("failed", errorText(err));
+    }
+
+    let request = (typed ?? "").trim();
+    if (!request) {
+      request = (await vscode.window.showInputBox({
+        title: `New session on ${project.name}`,
+        prompt: "What should NEO work on next? The completed session stays as read-only history.",
+        placeHolder: 'e.g. Add a GET /health endpoint that returns {"status":"ok"}.',
+        ignoreFocusOut: true,
+        validateInput: (v) => (v.trim() ? undefined : "Describe the work."),
+      }))?.trim() ?? "";
+      if (!request) return done("cancelled");
+    }
+
+    // How much of the pipeline: NEO's own kinds, labels and descriptions, in NEO's order.
+    // (`sessionKind`, not `kind`: QuickPickItem has a `kind` of its own.)
+    type Item = vscode.QuickPickItem & { sessionKind: string };
+    const items: Item[] = Object.entries(kinds).map(([key, k]) => ({
+      sessionKind: key,
+      label: k.label || key,
+      description: k.phase ? `starts at ${k.phase}` : undefined,
+      detail: k.description,
+    }));
+    let kind = "full";
+    if (items.length > 1) {
+      const picked = await vscode.window.showQuickPick(items, {
+        title: `New session on ${project.name}`,
+        placeHolder: "How much of NEO's pipeline should this work go through?",
+        ignoreFocusOut: true,
+      });
+      if (!picked) return done("cancelled");
+      kind = picked.sessionKind;
+    } else if (items.length === 1) {
+      kind = items[0].sessionKind;
+    }
+
+    const sending = typed !== undefined ? [...this.attachments] : [];
+    let text: string;
+    try {
+      text = await composeMessage(request, sending);
+    } catch (err) {
+      return done("failed", errorText(err));
+    }
+    if (text.length > SESSION_REQUEST_MAX) {
+      return done(
+        "failed",
+        `A new session's request can be at most ${SESSION_REQUEST_MAX.toLocaleString()} characters ` +
+          `(this one is ${text.length.toLocaleString()} with its attachments). Remove an attachment or shorten it.`,
+      );
+    }
+    if (project !== this.state.project) return done("cancelled");      // switched away meanwhile
+    try {
+      await this.client.startSession(project.id, { kind, request: text });
+    } catch (err) {
+      return done("failed", errorText(err));
+    }
+    this.attachments = this.attachments.filter((a) => !sending.includes(a));
+    done("started");
+    this.post({ type: "toast", level: "ok", text: "New session started" });
+    // Onto the new session: its own history, stream and state - as reopening the project shows it.
+    const gen = ++this.generation;
+    this.stopProject();
+    await this.loadProject(project.id, gen);
+    return true;
   }
 
   private async answer(m: { request?: string; text?: string; answers?: string[] }): Promise<void> {
@@ -1214,6 +1331,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         </button>
         <button id="send" type="submit" class="send" title="Send (Ctrl+Enter)" aria-label="Send">
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>
+          <span class="send-label">New session</span>
         </button>
       </div>
     </div>

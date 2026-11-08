@@ -17,6 +17,7 @@
     lastRole: "",              // "user" | "neo" | "other": who drew the last conversation item
     contextSig: "",            // the attachments and suggestion last drawn
     atPos: -1,                 // where an "@" that opened the file picker was typed
+    startingSession: false,    // a new session was asked for and NEO has not answered yet
   };
 
   // --- small helpers -----------------------------------------------------------------------
@@ -548,12 +549,20 @@
       : "No messages yet.";
 
     // composer: Send stays off while the agent is working, unless it is waiting on an answer
-    const canSend = connected && inProject && (!s.busy || s.awaiting);
+    // A completed session takes no more work: what is sent next starts a new session (the host's
+    // startSession, NEO's POST /sessions). It is never a message into the finished one.
+    const finished = inProject && s.phase === "done";
+    const canSend = connected && inProject && (!s.busy || s.awaiting) && !view.startingSession;
     $("send").disabled = !canSend;
     $("composer").classList.toggle("disabled", !canSend);
     $("composer").classList.toggle("working", working);
+    $("composer").classList.toggle("finished", finished);
+    $("send").title = finished ? `Start a new session with this request (${sendKey})` : `Send (${sendKey})`;
+    $("send").setAttribute("aria-label", finished ? "Start a new session" : "Send");
+    $("send-hint").textContent = finished ? `${sendKey} · new session` : `${sendKey} to send`;
     $("message").placeholder = !inProject ? "" : s.phase === "setup"
       ? "Describe what you want built — this starts the project"
+      : finished ? "This session is complete. Describe the next piece of work — it starts a new session."
       : s.awaiting ? "Answer NEO…" : working ? "NEO is working — you can type, Send unlocks when it stops"
       : s.atGate ? "Message NEO, or use the gate above" : "Message NEO…";
     renderStop(live, working);
@@ -862,6 +871,14 @@
     e.preventDefault();
     const text = $("message").value.trim();
     if (!text || $("send").disabled) return;
+    if ($("composer").classList.contains("finished")) {
+      // New work: the text stays in the box until NEO has started the session (or the user cancels
+      // the choice of pipeline), so nothing is lost and nothing is echoed into the finished session.
+      view.startingSession = true;
+      $("send").disabled = true;
+      vscode.postMessage({ type: "startSession", text });
+      return;
+    }
     $("message").value = "";
     fitInput();
     echoUser(text, ((view.state && view.state.attachments) || []).map((a) => a.label));
@@ -911,7 +928,11 @@
 
   function openNewProject(name, hasProject) {
     if (hasProject) {
-      toast("This folder is already a NEO project.", "info");
+      // New work on this project is a new session, not a new project.
+      const done = view.state && view.state.phase === "done";
+      toast(done
+        ? "This folder is already a NEO project. To start new work on it, type the next request in the message box: it starts a new session."
+        : "This folder is already a NEO project. New work can start as a new session once its current session is complete.", "info");
       return;
     }
     $("np-name").value = name || "";
@@ -1011,6 +1032,16 @@
         break;
       case "atResolved":
         atResolved();
+        break;
+      case "sessionStart":
+        view.startingSession = false;
+        if (m.outcome === "started") {
+          $("message").value = "";
+          fitInput();
+        } else if (m.outcome === "failed") {
+          toast(m.message || "Could not start a new session.", "error");
+        }
+        if (view.state) applyState(view.state);
         break;
     }
   });

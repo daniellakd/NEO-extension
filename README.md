@@ -121,19 +121,29 @@ plan's. The Review gate is not affected.
 
 ## Sessions and picking up where you left off
 
-A NEO project is worked on in **sessions**: building it is one, a change asked for afterwards (from
-the NEO web UI) is another. The sidebar shows the session NEO is working in now, the **active**
-session.
+A NEO project is worked on in **sessions**: building it is one, a change asked for afterwards is
+another. The sidebar always shows the newest one, the **current** session. Each session is
+**completed** once it reached Done, **running** while NEO works, **waiting for you** at a question
+or a gate, and otherwise **in progress**; an earlier session that NEO replaced before it reached Done
+is **ended**.
 
 - **At the top of the chat:** a line names the session the chat shows (**Current session** · title
   · type · when it started). When NEO has more of it than the sidebar loads, it says how many
   earlier events are not shown, with **Open the full session**. A session that starts while the
   sidebar is open gets its own separator in the chat.
 - **NEO: Sessions** (the history icon in the view title, or the Command Palette) lists every session
-  of the project, newest first: its type, whether it is active or ended, when it started and what was
-  asked. Picking one opens it as a **read-only** Markdown preview: the request, dates, gate
-  decisions and the stored history. Viewing a session never makes it active, never restarts work
-  and never changes the project; to act, use the sidebar.
+  of the project, newest first: its type, its state (`completed · current`, `completed`, `ended`…),
+  when it started and what was asked. Picking one opens it as a **read-only** Markdown preview: the
+  request, dates, gate decisions and the stored history. Viewing a session never changes the
+  current one, never restarts work and never changes the project; the sidebar stays on the current
+  session, so closing the preview is all it takes to return.
+- **Starting new work:** once the current session is **completed**, the message box changes: its
+  button reads **New session**, and what you send starts a new session on the same project instead
+  of going into the finished one. You pick how much of the pipeline it goes through (Full pipeline,
+  Quick plan, Quick change - NEO's own choices), NEO starts it, and the sidebar moves to it. The
+  completed session stays in **NEO: Sessions** as read-only history. **NEO: Start New Session** in
+  the Command Palette, and **Start new session…** at the top of NEO: Sessions, do the same. While a
+  session is still in progress, new work waits for it to complete.
 - **Since you were away:** the sidebar remembers, per project, the last NEO event you actually had
   on screen (sidebar visible, VS Code focused). When you come back, after reopening VS Code or
   returning to the window, a card lists what NEO stored after it: phases entered, gates reached,

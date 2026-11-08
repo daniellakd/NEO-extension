@@ -128,7 +128,9 @@
     const line = el("div", `session-mark ${cls}`);
     line.appendChild(el("span", `session-tag ${s.active ? "current" : "previous"}`, tag));
     line.appendChild(el("span", "session-title", s.title));
-    const facts = [s.kind, `started ${when(s.createdAt)}`];
+    // The state the host derived from NEO (src/sessionHistory.ts sessionState): "completed",
+    // "running", "ended"… - never "active" for a session that has finished.
+    const facts = [s.kind, s.state, `started ${when(s.createdAt)}`].filter(Boolean);
     if (!s.active && s.endedAt) facts.push(`ended ${when(s.endedAt)}`);
     if (s.count > 1) facts.push(`${s.index} of ${s.count}`);
     line.appendChild(el("span", "session-facts muted", facts.join(" · ")));
@@ -141,7 +143,7 @@
     const s = ui.project ? ui.s : null;
     const first = rows()[0];
     const sig = s && first
-      ? JSON.stringify([s.list.map((r) => [r.id, r.firstEvent, r.active, r.endedAt, r.title]), s.hiddenEarlier, s.newFrom])
+      ? JSON.stringify([s.list.map((r) => [r.id, r.firstEvent, r.active, r.endedAt, r.title, r.state]), s.hiddenEarlier, s.newFrom])
       : "";
     if (sig !== ui.headSig) {
       t.querySelectorAll(".session-head, .session-sep, .sessions-new").forEach((n) => n.remove());

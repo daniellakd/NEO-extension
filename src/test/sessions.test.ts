@@ -245,7 +245,7 @@ describe("the read-only session document", () => {
     const md = doc();
     assert.match(md, /^# Fix \\\*login\\\*\n/);
     assert.match(md, /\*\*Read-only snapshot\*\*/);
-    assert.match(md, /does not change the active session, restart any work, or modify the project/);
+    assert.match(md, /does not change the current session, restart any work, or modify the project/);
     assert.match(md, /\| Session \| 1 of 2 \|/);
     assert.match(md, /\| Type \| Quick change \|/);
     assert.match(md, /\| Status \| Ended \|/);
@@ -273,11 +273,13 @@ describe("the read-only session document", () => {
     assert.match(md, /\*\*Gate reached:\*\* Review · `docs\/neoag\/review.md`/);
   });
 
-  it("the active session says so", () => {
+  it("the current session says so, with its state when known", () => {
     const md = sessionMarkdown({ projectName: "p", session: session("s9"), index: 2, count: 2, active: true, events: [], total: 0, shown: 0, takenAt: 1 });
-    assert.match(md, /\| Status \| \*\*Active\*\* · the session the NEO sidebar follows \|/);
-    assert.match(md, /\| Ended \| — \(still active\) \|/);
+    assert.match(md, /\| Status \| \*\*Current\*\* · the session the NEO sidebar follows \|/);
+    assert.match(md, /\| Ended \| — \(current session\) \|/);
     assert.match(md, /_No stored events for this session._/);
+    const done = sessionMarkdown({ projectName: "p", session: session("s9"), index: 2, count: 2, active: true, state: "completed", events: [], total: 0, shown: 0, takenAt: 1 });
+    assert.match(done, /\| Status \| \*\*Current\*\* · completed · the session the NEO sidebar follows \|/);
   });
 
   it("escapes inline markup and keeps blocks apart", () => {
@@ -612,7 +614,8 @@ describe("inspecting a session is read-only", () => {
     await t.provider.showSessions();
     assert.deepEqual(offered.map((i) => i.id), ["s2", "s1"]);
     assert.match(offered[0].label!, /^\$\(circle-filled\) Fix login/);
-    assert.match(offered[0].description!, /2 of 2 · Quick change · active/);
+    // The current session is in execute and idle: "in progress", not the old catch-all "active".
+    assert.match(offered[0].description!, /2 of 2 · Quick change · in progress · current/);
     assert.match(offered[1].description!, /1 of 2 · Full pipeline · ended/);
     const open = stubState.commands.find((c) => c.id === "markdown.showPreview")!;
     const uri = open.args[0] as vscode.Uri;
