@@ -71,6 +71,12 @@
         "icon": "$(history)"
       },
       {
+        "command": "neo.startSession",
+        "title": "Start New Session",
+        "category": "NEO",
+        "icon": "$(add)"
+      },
+      {
         "command": "neo.addContext",
         "title": "Add Context to Message…",
         "category": "NEO"

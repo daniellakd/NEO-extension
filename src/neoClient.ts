@@ -113,6 +113,8 @@ export interface ProjectDetail {
   /** Every session of the project, oldest first. Absent from NEO versions without sessions. */
   sessions?: NeoSession[];
   gate_events?: GateEvent[];
+  /** Where each phase began in the session read: phase -> its first event's seq ("done" when it finished). */
+  phase_marks?: Record<string, number>;
   gate: Gate | null;
   busy: boolean;
   awaiting_answer: boolean;
@@ -163,6 +165,14 @@ export class NeoClient {
       `/api/projects/${enc(id)}/sessions`,
     );
     return { sessions: data.sessions ?? [], kinds: data.kinds ?? {} };
+  }
+
+  /**
+   * Another piece of work on the same project (NEO's POST /sessions): the current session ends, a
+   * new one starts at its kind's first phase, and the earlier sessions keep their own history.
+   */
+  startSession(id: string, body: { kind: string; request: string; title?: string }): Promise<{ session: NeoSession; phase: string }> {
+    return this.request("POST", `/api/projects/${enc(id)}/sessions`, body);
   }
 
   createProject(body: CreateProjectBody): Promise<Project> {

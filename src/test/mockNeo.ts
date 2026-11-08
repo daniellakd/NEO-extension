@@ -21,9 +21,18 @@ export interface MockProject {
   gate_events?: Record<string, unknown>[];
 }
 
+// NEO's SESSION_KINDS (orchestrator phases.py): what each kind is called and the phase it starts in.
+const MOCK_KINDS: Record<string, { label: string; description: string; phase: string }> = {
+  full: { label: "Full pipeline", description: "Interview, design, plan, TDD, review — every gate.", phase: "brainstorm" },
+  prd: { label: "Quick plan", description: "A short plan, approved once, then built.", phase: "plan" },
+  quick: { label: "Quick change", description: "Straight to the work, reviewed at the end.", phase: "execute" },
+};
+
 export class MockNeo {
   readonly projects = new Map<string, MockProject>();
   readonly calls: string[] = [];
+  /** The bodies of the POSTs that carry one (new sessions). */
+  readonly posts: { path: string; body: Record<string, unknown> }[] = [];
   readonly maxStreams = new Map<string, number>();
   refuseStreams = false;
   /** Holds a project read until it resolves (tests that need a read still in flight). */
@@ -114,7 +123,13 @@ export class MockNeo {
       : p.history;
     const limit = Math.max(1, Math.min(history, 2000));
     const shown = events.slice(-limit).map(({ __session, ...e }) => e);
+    // NEO's db.phase_marks: where each phase began in the chosen session ("done" once it finished).
+    const marks: Record<string, number> = {};
+    for (const e of events) {
+      if (e.kind === "phase" && typeof e.phase === "string" && !(e.phase in marks)) marks[e.phase] = e.seq as number;
+    }
     return {
+      phase_marks: marks,
       project: { id: p.id, name: p.name, path: p.path, phase: p.phase, entry_type: "new", idea: "A todo CLI" },
       phase: p.phase, at_gate: p.at_gate, session_id: p.sessions ? chosen ?? null : "ses", gate: p.gate, busy: p.busy, awaiting_answer: p.awaiting_answer,
       pending_request: p.pending_request, needs_attention: p.needs_attention, attention_reason: p.attention_reason,
@@ -152,7 +167,31 @@ export class MockNeo {
     }
     if (sub === "/sessions" && req.method === "GET") {
       if (!p.sessions) return json(404, { detail: "not found" });
-      return json(200, { sessions: p.sessions, kinds: { full: { label: "Full pipeline" }, prd: { label: "Quick plan" }, quick: { label: "Quick change" } } });
+      return json(200, { sessions: p.sessions, kinds: MOCK_KINDS });
+    }
+    if (sub === "/sessions" && req.method === "POST") {
+      // NEO's start_session: refused while the agent works or for an unknown kind; otherwise the
+      // current session ends, a new one starts at its kind's first phase, and its kickoff is sent.
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        const body = JSON.parse(raw || "{}") as { kind?: string; request?: string; title?: string };
+        this.posts.push({ path: sub, body });
+        const kind = MOCK_KINDS[body.kind ?? "quick"];
+        if (!kind) return json(422, { detail: `unknown session kind '${body.kind}'` });
+        if (p.busy) return json(409, { detail: "the agent is still working — wait for this session to finish" });
+        const session = this.startSession(p.id, {
+          id: `s${(p.sessions?.length ?? 0) + 1}-new`,
+          kind: body.kind ?? "quick",
+          title: body.title || String(body.request ?? "").split("\n")[0].slice(0, 60),
+          request: body.request,
+        });
+        p.phase = kind.phase;
+        this.emit(p.id, { kind: "phase", phase: kind.phase, session: session.id });
+        this.emit(p.id, { kind: "user", note: "new session", text: `Here is what I want:\n\n${body.request}` });
+        json(201, { session, phase: kind.phase });
+      });
+      return;
     }
     if (sub === "/stream") {
       if (this.refuseStreams) return json(503, { detail: "down" });
