@@ -69,7 +69,7 @@ export interface LiveView {
 
 /** What `buildLive` needs. `ViewState` satisfies this structurally. */
 export interface LiveInput {
-  connection: "connecting" | "connected" | "unreachable";
+  connection: "connecting" | "connected" | "reconnecting" | "unreachable";
   mode: "loading" | "noFolder" | "noProject" | "project";
   phase?: string;
   busy: boolean;
@@ -690,8 +690,10 @@ export function buildLive(
   let detail: string;
   if (!connected) {
     activity = "offline";
-    label = s.connection === "connecting" ? "connecting" : "not connected";
-    detail = "NEO is not reachable. Progress cannot be read until the connection is back.";
+    label = s.connection === "connecting" ? "connecting" : s.connection === "reconnecting" ? "reconnecting" : "not connected";
+    detail = s.connection === "reconnecting"
+      ? "NEO stopped answering. The sidebar keeps trying; the project and your draft are kept."
+      : "NEO is not reachable. Progress cannot be read until the connection is back.";
   } else if (!inProject) {
     activity = "loading";
     label = s.mode === "loading" ? "loading" : "";

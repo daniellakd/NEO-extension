@@ -48,7 +48,12 @@ export const stubState: {
   inputBox: string | undefined;
   /** Every information message shown, in order. */
   infos: string[];
-} = { folders: [], serverUrl: "http://127.0.0.1:0", quickPick: null, commands: [], focused: true, inputBox: undefined, infos: [] };
+  /** Every warning and error notification shown, with the actions it offered. */
+  warnings: { text: string; actions: string[] }[];
+  errors: { text: string; actions: string[] }[];
+  /** What the "NEO" output channel was given. */
+  log: string[];
+} = { folders: [], serverUrl: "http://127.0.0.1:0", quickPick: null, commands: [], focused: true, inputBox: undefined, infos: [], warnings: [], errors: [], log: [] };
 
 const vscode = {
   Uri,
@@ -71,8 +76,9 @@ const vscode = {
     onDidChangeWindowState: event(),
     showInformationMessage: async (m: string) => void stubState.infos.push(m),
     showInputBox: async () => stubState.inputBox,
-    showWarningMessage: async () => undefined,
-    showErrorMessage: async () => undefined,
+    showWarningMessage: async (text: string, ...actions: string[]) => void stubState.warnings.push({ text, actions }),
+    showErrorMessage: async (text: string, ...actions: string[]) => void stubState.errors.push({ text, actions }),
+    createOutputChannel: () => ({ appendLine: (l: string) => void stubState.log.push(l), show() {}, dispose() {} }),
     showQuickPick: async (items: { id?: string }[]) => (stubState.quickPick ? stubState.quickPick(items) : undefined),
     showTextDocument: async () => undefined,
     registerWebviewViewProvider: disposable,

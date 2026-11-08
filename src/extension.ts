@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { ChatViewProvider } from "./chatViewProvider";
+import { openSettings } from "./errors";
 
 /**
  * NEO: a sidebar chat over the local NEO-AG orchestrator. The extension never starts NEO and
@@ -17,7 +18,10 @@ export function activate(context: vscode.ExtensionContext): void {
       // and losing a half-typed gate reason — every time the sidebar is switched away from.
       webviewOptions: { retainContextWhenHidden: true },
     }),
-    vscode.commands.registerCommand("neo.connect", () => provider.connect()),
+    // Reconnect: keeps the open project, its draft and attached context (see ChatViewProvider.retry).
+    vscode.commands.registerCommand("neo.connect", () => provider.retry()),
+    // VS Code's own Settings editor, filtered to NEO's settings.
+    vscode.commands.registerCommand("neo.openSettings", () => openSettings()),
     vscode.commands.registerCommand("neo.refresh", () => provider.refresh()),
     vscode.commands.registerCommand("neo.newProject", async () => {
       await vscode.commands.executeCommand(`${ChatViewProvider.viewId}.focus`);

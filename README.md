@@ -181,6 +181,27 @@ NEO creates new projects inside its projects folder. To create one in the folder
 
 3. Use the folder's name as the project name (`todo-api`).
 
+## Connection and errors
+
+- **NEO is offline:** the sidebar shows the configured server URL, **Retry** and **Open NEO
+  Settings**. Start NEO and press **Retry**; with no project open the sidebar also checks again
+  every 10 seconds and connects on its own. Header actions that need NEO stay visible but disabled,
+  and their tooltip says why.
+- **Connection lost with a project open:** the header says **Reconnecting…** and the project,
+  transcript, your typed message and attached files stay as they are. After three failed reads in a
+  row (about 30 seconds) the sidebar says **NEO is offline**, and keeps trying in the background.
+  When NEO answers again it says **Reconnected to NEO** and catches up on what it missed.
+- **Errors** are shown as a short summary, with what to do where it is known. **Show details**
+  expands the technical part (HTTP status, NEO's response, the network cause). The same details are
+  written to the **NEO** output channel (**View → Output → NEO**).
+- **Retry** only repeats reads (reconnect, reload the project, list projects or sessions). Sending a
+  message, answering, approving or rejecting a gate, creating a project and starting a session are
+  never repeated automatically; the text you typed is kept so you can decide. If NEO may have
+  received an action before the connection failed, the sidebar says so: check the transcript before
+  sending it again.
+- **Settings:** `NEO: Open NEO Settings` (Command Palette, or the sidebar's **…** menu) opens VS
+  Code's Settings at **neo.serverUrl**.
+
 ---
 
 <sub>NEO · Powered by CodeValue</sub>
