@@ -182,6 +182,37 @@ export interface AwayInput {
   now: NowInput;
 }
 
+/**
+ * Tells a repeated announcement of one gate visit from a new visit. NEO can announce a gate that is
+ * already open again (its `gate` event re-sent for the same phase), which would otherwise be drawn
+ * as the gate being reached twice. A visit ends only when NEO moves to another phase - approval
+ * moving on, or Request Changes sending the work back - so a later `gate` for the same phase after
+ * that is a real re-review and is kept. Feed every event in order.
+ */
+export class GateVisits {
+  private open: string | null = null;
+
+  /** True when `ev` is a gate already announced for the visit still open. */
+  repeat(ev: NeoEvent): boolean {
+    if (ev.kind === "phase") {
+      const p = String(ev.phase ?? "");
+      if (p && p !== this.open) this.open = null;
+      return false;
+    }
+    if (ev.kind !== "gate") return false;
+    const phase = String(ev.phase ?? "");
+    if (this.open === phase) return true;
+    this.open = phase;
+    return false;
+  }
+}
+
+/** The events with each gate visit announced once (see GateVisits). Order is kept. */
+export function dedupeGates<T extends NeoEvent>(events: T[]): T[] {
+  const visits = new GateVisits();
+  return events.filter((e) => !visits.repeat(e));
+}
+
 // Kinds the transcript draws (chat.js render), for placing the "new" divider.
 const DRAWN = new Set(["user", "text", "tool", "question", "notice", "phase", "gate", "error"]);
 
@@ -254,7 +285,7 @@ export function awaySummary(input: AwayInput): AwaySummary | null {
   // Events since the anchor, each once.
   const bySeq = new Map<number, NeoEvent>();
   for (const e of input.events) if (typeof e.seq === "number" && e.seq > anchor.seq) bySeq.set(e.seq, e);
-  const fresh = [...bySeq.values()].sort((a, b) => (a.seq as number) - (b.seq as number));
+  const fresh = dedupeGates([...bySeq.values()].sort((a, b) => (a.seq as number) - (b.seq as number)));
   const partial = !input.complete;
   const n = (count: number, one: string, many = `${one}s`) => `${partial ? "at least " : ""}${count} ${count === 1 ? one : many}`;
 
@@ -564,7 +595,7 @@ interface Block {
 export function historyBlocks(events: NeoEvent[], stages?: StageLabel[]): Block[] {
   const merged = new Map<string, NeoEvent>();
   const order: string[] = [];
-  const sorted = [...events].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
+  const sorted = dedupeGates([...events].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0)));
   for (const ev of sorted) {
     let key: string;
     if ((ev.kind === "text" || ev.kind === "tool" || ev.kind === "error") && ev.part !== undefined && ev.part !== null) {

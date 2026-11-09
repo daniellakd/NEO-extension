@@ -160,7 +160,7 @@ describe("command registration", () => {
     assert.equal(title("neo.openPlan"), "Open Plan");
     assert.equal(title("neo.openChanges"), "Open Current Changes");
     assert.equal(title("neo.goTo"), "Go to…");
-    assert.equal(title("neo.openSettings"), "Open Settings");
+    assert.equal(title("neo.openSettings"), "Open NEO Settings");
   });
 
   it("menus only name contributed commands, and no global keybinding is added", () => {
@@ -389,7 +389,7 @@ describe("Open Current Changes", () => {
     await run("neo.openChanges");
     assert.deepEqual(stubState.infos, []);
     assert.equal(stubState.warnings.length, 1);
-    assert.match(stubState.warnings[0], /^NEO: could not read the changes: /);
+    assert.match(stubState.warnings[0].text, /^NEO: could not read the changes: /);
   });
 });
 

@@ -38,12 +38,12 @@ import {
   touchesPlan,
 } from "./progress";
 import { ChangesController, ChangesMessage, changesPhase } from "./changes";
-import { ArtifactView, ArtifactsView, PlanArtifacts, PlanMessage, StageLike } from "./plan";
-import { kindLabel, sessionStateLabel } from "./sessionHistory";
+import { ArtifactView, ArtifactsView, PlanArtifacts, PlanMessage, StageLike, documentGates, railStages } from "./plan";
+import { GateVisits, kindLabel, sessionStateLabel } from "./sessionHistory";
 import { SessionsController, SessionsMessage, SessionsView } from "./sessions";
 import { SseStream } from "./sseStream";
 import { ErrorAction, ErrorView, OPEN_SETTINGS, describeError, logError, notifyError, openSettings } from "./errors";
-import { currentFolder, neoSlug, normalizePath, projectForFolder, samePath } from "./workspace";
+import { currentFolder, insidePath, neoSlug, normalizePath, projectForFolder, samePath } from "./workspace";
 
 /**
  * The sidebar: one webview, one NEO project (the one living in the open folder).
@@ -128,6 +128,8 @@ interface ViewState {
   project?: { id: string; name: string; path: string; idea?: string };
   phase?: string;
   stages: Stage[];
+  /** The rail as drawn: NEO's stages, with a gate waiting for a decision not yet current (railStages). */
+  rail?: Stage[];
   busy: boolean;
   atGate: boolean;
   gate: Gate | null;
@@ -176,7 +178,14 @@ type Inbound =
   | { type: "openFolder"; path: string }
   | { type: "addContext"; source: ContextSource }
   | { type: "removeContext"; id: string }
+  | { type: "draft"; text: string }
   | { type: "startSession"; text: string };
+
+/** What the message box holds for one project and has not sent: the typed text and the chips. */
+interface Composer {
+  draft: string;
+  attachments: Attachment[];
+}
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewId = "neo.chat";
@@ -212,6 +221,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   // Attached context lives here, not in the webview: a selection is a snapshot only the host can
   // take, and the chips survive the webview reloading.
   private attachments: Attachment[] = [];
+  // The message box's text as the webview last reported it, and each other project's unsent text
+  // and chips: switching projects puts away one project's composer and brings back the other's.
+  private draft = "";
+  private composers = new Map<string, Composer>();
+  // Repeated announcements of one gate visit are drawn once (src/sessionHistory.ts).
+  private gateVisits = new GateVisits();
 
   // Live progress. The plan is remembered per project; the action and the notice are whatever the
   // newest events said. None of them decides anything: they only describe what NEO reported.
@@ -299,10 +314,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     return e && !e.document.isClosed ? e : undefined;
   }
 
-  /** What one click on the suggested chip would attach: the selection if there is one. */
+  /**
+   * What one click on the suggested chip would attach: the selection if there is one. Only a file of
+   * the project on screen is offered - after a switch to another project, the editor's file belongs
+   * to the one left behind.
+   */
   private suggestion(): ViewState["suggestion"] {
     const e = this.editor();
-    if (!e) return null;
+    const project = this.state.project;
+    if (!e || !project || !insidePath(e.document.uri.fsPath, project.path)) return null;
     const rel = vscode.workspace.asRelativePath(e.document.uri, false);
     const lines = e.selection.isEmpty ? undefined : selectedLines(e.selection);
     if (this.attachments.some((a) => sameTarget(a, { uri: e.document.uri, lines }))) return null;
@@ -323,20 +343,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     if (source === "file" || source === "selection") kind = source;
     else if (source === "at") kind = "choose";
     else if (source === "suggested") kind = editor && !editor.selection.isEmpty ? "selection" : "file";
-    else {
-      type Item = vscode.QuickPickItem & { action: "file" | "selection" | "choose" };
-      const items: Item[] = [];
-      if (editor) {
-        const rel = vscode.workspace.asRelativePath(editor.document.uri, false);
-        items.push({ action: "file", label: "$(file) Current file", description: rel });
-        if (!editor.selection.isEmpty) {
-          const lines = selectedLines(editor.selection);
-          items.push({ action: "selection", label: "$(selection) Current selection", description: labelOf({ path: rel, lines }) });
-        }
-      }
-      items.push({ action: "choose", label: "$(search) Choose file…", description: "from this workspace" });
-      kind = (await vscode.window.showQuickPick(items, { title: "Add context to your NEO message" }))?.action;
-    }
+    else kind = await this.pickContextAction(editor);
     if (!kind) return;
 
     if (this.attachments.length >= MAX_ITEMS) {
@@ -369,6 +376,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.postState();
   }
 
+  /**
+   * The + menu: the same three actions every time, each saying what it would attach or why it cannot
+   * yet. "Add Workspace File" is exactly what typing "@" does; all three end in addContext's one
+   * attach path, with its limits and checks.
+   */
+  private async pickContextAction(editor: vscode.TextEditor | undefined): Promise<"file" | "selection" | "choose" | undefined> {
+    type Item = vscode.QuickPickItem & { action: "file" | "selection" | "choose" };
+    const rel = editor ? vscode.workspace.asRelativePath(editor.document.uri, false) : undefined;
+    const lines = editor && !editor.selection.isEmpty ? selectedLines(editor.selection) : undefined;
+    const items: Item[] = [
+      { action: "file", label: "$(file) Add Current File", description: rel ?? "no file is open in the editor" },
+      {
+        action: "selection",
+        label: "$(selection) Add Selection",
+        description: rel && lines ? labelOf({ path: rel, lines }) : "select lines in the editor first",
+      },
+      { action: "choose", label: "$(search) Add Workspace File…", description: "search this workspace's files (same as typing @)" },
+    ];
+    const picked = await vscode.window.showQuickPick(items, {
+      title: "Add context to your NEO message",
+      placeHolder: `Attach up to ${MAX_ITEMS} files or selections; each is shown as a chip until you send`,
+    });
+    return picked?.action;
+  }
+
   private removeContext(id: string): void {
     this.attachments = this.attachments.filter((a) => a.id !== id);
     this.postState();
@@ -379,6 +411,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   }
 
   /**
+   * Leave the project on screen for another one: its unsent text and chips are put away under its
+   * id, and the other project's are brought back - or an empty box, if it has none. Context gathered
+   * for one project never shows in another. Reloading the same project (Retry, a reconnect, a new
+   * session) does not come through here, so those keep the composer as it is.
+   */
+  private switchComposer(to: string | undefined): void {
+    const from = this.state.project?.id;
+    if (from === to && from !== undefined) return;
+    if (from !== undefined) {
+      if (this.draft.trim() || this.attachments.length) {
+        this.composers.set(from, { draft: this.draft, attachments: this.attachments });
+      } else {
+        this.composers.delete(from);
+      }
+    }
+    const next = to !== undefined ? this.composers.get(to) : undefined;
+    if (to !== undefined) this.composers.delete(to);
+    this.attachments = next?.attachments ?? [];
+    this.draft = next?.draft ?? "";
+    this.post({ type: "composer", text: this.draft });
+  }
+
+  /**
    * Start over: a changed setting or workspace leads here, and so does Retry when no project is
    * open. Everything is read again from NEO; attached context was gathered for the old state.
    */
@@ -386,7 +441,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.client = new NeoClient(serverUrl());
     this.stopOfflinePoll();
     this.stopProject();
-    this.clearContext();
+    // The project on screen keeps its unsent text and chips for when it is shown again.
+    this.switchComposer(undefined);
     this.failures = 0;
     const gen = ++this.generation;
     const folder = currentFolder();
@@ -419,6 +475,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       const match = projectForFolder(await this.client.listProjects(), folder);
       if (gen !== this.generation) return;
       if (match) {
+        this.switchComposer(match.id);
         await this.loadProject(match.id, gen);
       } else {
         this.state.mode = "noProject";
@@ -579,7 +636,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     // matters: the new project's events have their own, possibly lower, sequence numbers.
     this.post({ type: "history", events: [] });
     this.post({ type: "gateDone" });                 // no comment or refusal carries across
-    this.clearContext();                             // context was gathered for the other project
+    this.switchComposer(picked.id);                  // each project keeps its own draft and context
     this.state.project = undefined;
     await this.loadProject(picked.id, gen);
   }
@@ -681,7 +738,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       return;
     }
     if (!snap.files.length) {
-      info(`no files changed${snap.label ? ` (${snap.label})` : ""}.`);
+      info(snap.source === "none"
+        ? `no changes found for the current session of ${project.name}: ${snap.label || "no NEO work branch or merge was found"}.`
+        : `no files changed (${snap.label}).`);
       return;
     }
     const count = (n: number | null, sign: string) => (n === null ? "binary" : `${sign}${n}`);
@@ -735,9 +794,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     if (changesPhase(this.state.phase)) {
       const snap = this.changes.current(project.path);
       const n = snap ? snap.files.length : 0;
+      // The same count the Changes strip and the review gate show ("300+" when the list is cut).
       items.push({
         label: "$(diff) Changes",
-        description: snap ? `${n} file${n === 1 ? "" : "s"}` : "reading…",
+        description: !snap ? "reading…"
+          : snap.error ? "could not read git"
+          : snap.source === "none" ? "no changes found"
+          : `${n}${snap.truncated ? "+" : ""} file${n === 1 && !snap.truncated ? "" : "s"}`,
         detail: "Open a changed file's diff",
         go: () => this.openChanges(),
       });
@@ -801,7 +864,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     }
     this.applyDetail(detail);
 
-    const events = detail.history.filter((e) => !IGNORED_KINDS.has(e.kind));
+    this.gateVisits = new GateVisits();
+    const events = detail.history.filter((e) => !IGNORED_KINDS.has(e.kind) && !this.gateVisits.repeat(e));
     this.transcript = events.slice(-TRANSCRIPT_CAP);
     this.lastSeq = maxSeq(detail.history, 0);
     // State first: the history is drawn against it (the kickoff needs this project's idea).
@@ -854,6 +918,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.flushTimer = undefined;
     this.lastSeq = 0;
     this.transcript = [];
+    this.gateVisits = new GateVisits();
     this.plan.stop();
     this.sessions.close();
     this.action.reset();
@@ -904,7 +969,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       this.sessions.noteEvent(ev);
     }
     this.applyEvent(ev);
-    if (IGNORED_KINDS.has(ev.kind)) return;
+    // A gate already announced for the visit still open moves the state above, but is not drawn again.
+    if (IGNORED_KINDS.has(ev.kind) || this.gateVisits.repeat(ev)) return;
     this.transcript.push(ev);
     if (this.transcript.length > TRANSCRIPT_CAP) this.transcript.splice(0, this.transcript.length - TRANSCRIPT_CAP);
     this.outbox.push(ev);
@@ -1136,6 +1202,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       case "ready":
         this.postState();
         if (this.state.project) this.post({ type: "history", events: this.transcript });
+        if (this.draft) this.post({ type: "composer", text: this.draft });   // a reloaded webview's box is empty
+        return;
+      case "draft":
+        this.draft = typeof m.text === "string" ? m.text : "";
         return;
       case "connect":
       case "retry":
@@ -1563,6 +1633,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       this.postProblem(problem);
     }
     this.post({ type: "projectCreated" });
+    this.switchComposer(created.id);
     const gen = ++this.generation;
     this.stopProject();
     await this.loadProject(created.id, gen);
@@ -1641,8 +1712,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.state.attachments = this.attachments.map(viewOf);
     this.state.suggestion = this.state.mode === "project" ? this.suggestion() : null;
     this.settleStopping();
-    // NEO's count - or, once Execute is over and NEO's has dropped, the furthest one remembered.
-    const plan = this.plan.view(this.state.planProgress, this.state.phase, this.lastSeq);
+    const session = this.state.mode === "project" ? this.sessions.activeSession() : null;
+    // NEO's count - or, once Execute is over and NEO's has dropped, the furthest one remembered for
+    // this session. A session whose rail has no plan step (a quick change) has no task progress of
+    // its own: whatever NEO counts then is an earlier build's plan, not this work's.
+    const stages = this.state.stages as StageLike[];
+    const ownPlan = !stages.length || documentGates(stages).length > 0;
+    const plan = ownPlan
+      ? this.plan.view(this.state.planProgress, this.state.phase, this.lastSeq, session?.id)
+      : { progress: null, task: null };
+    this.state.rail = railStages(this.state.stages, this.state.atGate, this.state.gate?.phase);
     // Before the state goes out: unseen activity on screen now is summarised, then marked seen.
     if (this.state.mode === "project") this.sessions.sync(this.lastSeq, this.state, plan.progress);
     this.state.sessions = this.state.mode === "project" ? this.sessions.view() : undefined;
@@ -1652,7 +1731,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       this.action.current(),
       liveNotice(this.notice, this.state.busy),
     );
-    this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
+    this.changes.update(
+      this.state.mode === "project" ? this.state.project : undefined,
+      this.state.phase,
+      session ? { id: session.id, since: session.createdAt } : undefined,
+    );
     this.state.artifacts = this.artifacts.build({ ...this.state, stages: this.state.stages as StageLike[] });
     this.post({ type: "state", state: this.state });
     this.syncContextKeys();

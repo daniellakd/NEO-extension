@@ -149,4 +149,16 @@ describe("buildLive - connection and phases", () => {
     for (const phase of ["execute", "review", "review-gate", "finish", "done"]) assert.ok(live({ phase }).progress, phase);
     assert.equal(live({ phase: "plan-gate", planProgress: { done: 0, total: 5 } }).progress, null);
   });
+
+  it("once Execute is over no task is presented as current; a finished plan says so", () => {
+    const open = { unit: "task" as const, index: 3, total: 3, title: "Docs", tasksDone: 2, complete: false };
+    const done = { unit: "step" as const, index: 6, total: 6, complete: true };
+    assert.deepEqual(buildLive(state({ phase: "execute" }), open, null, null).task, open, "Execute: the task being worked on");
+    for (const phase of ["review", "review-gate", "finish", "done"]) {
+      const unfinished = buildLive(state({ phase, planProgress: { done: 5, total: 6 } }), open, null, null);
+      assert.equal(unfinished.task, null, `${phase}: no old task as the current one`);
+      assert.deepEqual(unfinished.progress, { done: 5, total: 6 }, `${phase}: the count stays`);
+      assert.deepEqual(buildLive(state({ phase, planProgress: { done: 6, total: 6 } }), done, null, null).task, done, `${phase}: "All 6 tasks done"`);
+    }
+  });
 });

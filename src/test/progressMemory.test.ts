@@ -100,6 +100,26 @@ describe("reconcile - NEO's count, or the remembered one", () => {
     assert.equal(r.record, kept);
   });
 
+  it("a count is never carried into another session, even for a plan of the same shape", () => {
+    const build = record(3, { session: "s1" });
+    for (const phase of ["execute", "review", "done"]) {
+      const r = reconcile({ backend: null, phase, plan, seq: 300, record: build, session: "s2" });
+      assert.equal(r.progress, null, `${phase}: the new session has no count of its own`);
+      assert.equal(r.restored, false);
+      assert.equal(r.record, undefined, `${phase}: the other session's record is dropped`);
+    }
+    // A record from before sessions were tracked is not trusted for a session either.
+    assert.equal(reconcile({ backend: null, phase: "done", plan, seq: 300, record: record(3), session: "s2" }).progress, null);
+  });
+
+  it("within its own session the remembered count still stands after Execute", () => {
+    const counted = reconcile({ backend: { done: 3, total: 3 }, phase: "execute", plan, seq: 200, record: undefined, session: "s1" });
+    assert.equal(counted.record?.session, "s1");
+    const r = reconcile({ backend: { done: 0, total: 3 }, phase: "done", plan, seq: 300, record: counted.record, session: "s1" });
+    assert.deepEqual(r.progress, { done: 3, total: 3 });
+    assert.equal(r.restored, true);
+  });
+
   it("clamps a count past its total", () => {
     const r = reconcile({ backend: { done: 9, total: 3 }, phase: "execute", plan, seq: 1, record: undefined });
     assert.deepEqual(r.progress, { done: 3, total: 3 });

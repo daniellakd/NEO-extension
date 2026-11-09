@@ -580,7 +580,8 @@
     const kind = phase.endsWith("-gate") ? "gate" : phase === "done" ? "done" : "";
     // Actively running a turn — not waiting on an answer or an approval.
     const working = connected && inProject && s.busy && !s.awaiting && !s.atGate;
-    renderRail(inProject ? s.stages : []);
+    // The host's rail (src/plan.ts railStages): a gate waiting for a decision is not yet current.
+    renderRail(inProject ? s.rail || s.stages : []);
 
     // Current plan task, plan progress, current action, and the single line for a stall, a stop
     // or a reconnect. All of it is computed by the host (src/progress.ts) and drawn into #live by
@@ -668,7 +669,8 @@
     const box = $("composer-status");
     box.innerHTML = "";
     const chip = el("span", `chip ${kind}`, phaseName(phase));
-    chip.title = phase ? stageLabel(phase) : "";
+    // At a gate, the gate's own title ("Code review"), not the label of what approval leads to.
+    chip.title = !phase ? "" : s.atGate && s.gate && s.gate.title ? s.gate.title : stageLabel(phase);
     if (phase) box.appendChild(chip);
     const activity = live ? live.activity : connected ? "idle" : "offline";
     const text = live ? live.label : connected ? "" : "not connected";
@@ -714,7 +716,7 @@
     (stages || []).forEach((stage, i) => {
       if (i) rail.appendChild(el("span", "sep", "›"));
       const chip = el("span", `stage ${stage.state} ${stage.kind}`, stage.label);
-      chip.title = stage.phase;
+      chip.title = stage.state === "waiting" ? `${stage.phase} - waiting for your decision` : stage.phase;
       rail.appendChild(chip);
     });
   }
@@ -1040,6 +1042,12 @@
   $("send-hint").textContent = `${sendKey} to send`;
   $("send").title = `Send (${sendKey})`;
 
+  // The host keeps each project's unsent text (src/chatViewProvider.ts switchComposer): it is told
+  // whenever the box changes, so a switch of project can put this one away and bring the other back.
+  function syncDraft() {
+    vscode.postMessage({ type: "draft", text: $("message").value });
+  }
+
   $("composer").addEventListener("submit", (e) => {
     e.preventDefault();
     const text = $("message").value.trim();
@@ -1054,6 +1062,7 @@
     }
     $("message").value = "";
     fitInput();
+    syncDraft();
     echoUser(text, ((view.state && view.state.attachments) || []).map((a) => a.label));
     vscode.postMessage({ type: "send", text });
   });
@@ -1064,6 +1073,7 @@
   // a chip. Cancelling leaves the "@" as typed, so an e-mail address or a decorator is unaffected.
   $("message").addEventListener("input", (e) => {
     fitInput();
+    syncDraft();
     if (e.inputType !== "insertText" || e.data !== "@") return;
     const box = $("message");
     const at = box.selectionStart - 1;
@@ -1081,6 +1091,7 @@
     box.focus();
     box.setSelectionRange(at, at);
     fitInput();
+    syncDraft();
   }
   $("message").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -1166,6 +1177,7 @@
         $("transcript").querySelectorAll(".msg.user.optimistic").forEach((n) => n.remove());
         if (!$("message").value) $("message").value = m.text || "";   // do not lose what was typed
         fitInput();
+        syncDraft();
         toast(m.message, "error", m);
         break;
       case "answerFailed":
@@ -1211,11 +1223,19 @@
       case "atResolved":
         atResolved();
         break;
+      case "composer":
+        // Another project's composer (or an empty one): its own unsent text replaces this one's,
+        // which the host has put away for when that project is shown again.
+        view.atPos = -1;
+        $("message").value = m.text || "";
+        fitInput();
+        break;
       case "sessionStart":
         view.startingSession = false;
         if (m.outcome === "started") {
           $("message").value = "";
           fitInput();
+          syncDraft();
         } else if (m.outcome === "failed") {
           toast(m.message || "Could not start a new session.", "error", m);
         }

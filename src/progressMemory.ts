@@ -38,6 +38,8 @@ export interface ProgressRecord {
   ticks?: boolean[];
   /** The newest NEO event seen when it was recorded: a re-plan after it makes it stale. */
   seq: number;
+  /** The NEO work session that counted it. Another session never inherits it. */
+  session?: string;
 }
 
 /**
@@ -75,17 +77,21 @@ export function reconcile(input: {
   ticks?: boolean[];
   seq: number;
   record: ProgressRecord | undefined;
+  /** The NEO work session on screen (undefined: a NEO without sessions). */
+  session?: string;
 }): Reconciled {
-  const { phase, plan, seq } = input;
+  const { phase, plan, seq, session } = input;
   const backend = input.backend && input.backend.total > 0 ? clamp(input.backend) : null;
   const stage = stageOf(phase);
 
   // A new plan is being made: whatever was counted belonged to the last one.
   if (stage === "before") return { progress: backend, record: undefined, restored: false };
 
-  // The record is only ever about the plan it was made for. Unknown plan: keep it, use nothing.
+  // The record is only ever about the plan, and the session, it was made for. Unknown plan: keep
+  // it, use nothing. Another session: it is gone - a new session never shows an old build's count.
   let record = input.record;
   if (record && plan && record.plan !== plan.key) record = undefined;
+  if (record && session !== undefined && record.session !== session) record = undefined;
   const usable = Boolean(record && plan);
 
   // What NEO says, as a record - only when it is about the plan known here.
@@ -97,6 +103,7 @@ export function reconcile(input: {
           total: backend.total,
           ticks: input.ticks && input.ticks.length === backend.total && ticked(input.ticks) === backend.done ? input.ticks : undefined,
           seq,
+          ...(session !== undefined ? { session } : {}),
         }
       : undefined;
 
@@ -122,6 +129,7 @@ function keep(record: ProgressRecord | undefined, counted: ProgressRecord | unde
   const same =
     record &&
     record.plan === counted.plan &&
+    record.session === counted.session &&
     record.done === counted.done &&
     record.total === counted.total &&
     (counted.ticks === undefined || JSON.stringify(record.ticks) === JSON.stringify(counted.ticks));

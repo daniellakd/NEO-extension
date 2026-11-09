@@ -13,10 +13,12 @@ import { ChatViewProvider } from "../chatViewProvider";
 import type { GateEvent, NeoEvent, NeoSession } from "../neoClient";
 import {
   AwayInput,
+  GateVisits,
   SeenAnchor,
   anchorKey,
   awaySummary,
   covers,
+  dedupeGates,
   describeNow,
   formatTime,
   historyBlocks,
@@ -179,12 +181,25 @@ describe("awaySummary", () => {
   });
 
   it("a gate reached again after changes were requested is one line with a count", () => {
+    // Request Changes sends the work back (a phase event), and the re-review reaches the gate again.
     const events: NeoEvent[] = [
       { kind: "gate", phase: "review-gate", title: "Code review", seq: 11 },
-      { kind: "gate", phase: "review-gate", title: "Code review", seq: 12 },
+      { kind: "phase", phase: "review", seq: 12 },
+      { kind: "gate", phase: "review-gate", title: "Code review", seq: 13 },
     ];
-    const s = awaySummary(input({ events, newestSeq: 12 }))!;
-    assert.deepEqual(s.items.map((i) => i.text), ["Reached the gate: Code review (2 times)"]);
+    const s = awaySummary(input({ events, newestSeq: 13 }))!;
+    assert.ok(s.items.map((i) => i.text).includes("Reached the gate: Code review (2 times)"));
+  });
+
+  it("the same open gate announced twice is reached once", () => {
+    const events: NeoEvent[] = [
+      { kind: "phase", phase: "review-gate", seq: 11 },
+      { kind: "gate", phase: "review-gate", title: "Code review", seq: 12 },
+      { kind: "gate", phase: "review-gate", title: "Code review", seq: 13 },
+    ];
+    const s = awaySummary(input({ events, newestSeq: 13 }))!;
+    assert.ok(s.items.map((i) => i.text).includes("Reached the gate: Code review"));
+    assert.ok(!s.items.some((i) => /2 times/.test(i.text)));
   });
 
   it("coming back to an open window: only a change of picture makes a card", () => {
@@ -285,6 +300,33 @@ describe("the read-only session document", () => {
   it("escapes inline markup and keeps blocks apart", () => {
     assert.equal(mdInline("a*b_[c]<d>|#`"), "a\\*b\\_\\[c\\]\\<d\\>\\|\\#\\`");
     assert.equal(historyBlocks([{ kind: "usage", seq: 1 }, { kind: "idle", seq: 2 }]).length, 0);
+  });
+});
+
+describe("gate visits: each drawn once, real re-reviews kept", () => {
+  const gate = (seq: number): NeoEvent => ({ kind: "gate", phase: "review-gate", title: "Code review", seq });
+  const phase = (p: string, seq: number): NeoEvent => ({ kind: "phase", phase: p, seq });
+  const reached = (events: NeoEvent[]) => historyBlocks(events).filter((b) => /Gate reached/.test(b.md)).length;
+
+  it("the same open gate announced again is one occurrence", () => {
+    assert.equal(reached([phase("review-gate", 1), gate(2), gate(3)]), 1);
+    assert.deepEqual(dedupeGates([phase("review-gate", 1), gate(2), gate(3)]).map((e) => e.seq), [1, 2]);
+  });
+
+  it("Request Changes and a later re-review is a second, separate visit", () => {
+    const events = [gate(2), phase("review", 3), phase("review-gate", 4), gate(5)];
+    assert.equal(reached(events), 2);
+    assert.deepEqual(dedupeGates(events).map((e) => e.seq), [2, 3, 4, 5]);
+  });
+
+  it("different gates are never merged", () => {
+    const events: NeoEvent[] = [{ kind: "gate", phase: "plan-gate", title: "Plan", seq: 1 }, phase("execute", 2), gate(3)];
+    assert.equal(dedupeGates(events).length, 3);
+  });
+
+  it("GateVisits keeps its place across a live stream", () => {
+    const v = new GateVisits();
+    assert.deepEqual([gate(1), gate(2), phase("execute", 3), gate(4)].map((e) => v.repeat(e)), [false, true, false, false]);
   });
 });
 

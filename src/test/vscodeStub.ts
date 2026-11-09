@@ -71,6 +71,9 @@ export const stubState: {
 
   /** Commands registered through vscode.commands.registerCommand, by id. */
   registered: Map<string, (...args: unknown[]) => unknown>;
+
+  /** What workspace.findFiles finds (absolute paths): the files "@" can offer. */
+  files: string[];
 } = {
   folders: [],
   serverUrl: "http://127.0.0.1:0",
@@ -83,7 +86,48 @@ export const stubState: {
   errors: [],
   log: [],
   registered: new Map(),
+  files: [],
 };
+
+/**
+ * window.createQuickPick, as the workspace file picker drives it: once its listeners are in place,
+ * `stubState.quickPick` is asked for the item (undefined: the user pressed Escape).
+ */
+function createQuickPick() {
+  let accepted: (() => void) | undefined;
+  let hidden: (() => void) | undefined;
+  let open = true;
+  const pick = {
+    title: "", placeholder: "", matchOnDescription: false, busy: false,
+    items: [] as { id?: string }[],
+    selectedItems: [] as unknown[],
+    show() {},
+    hide() {
+      if (!open) return;
+      open = false;
+      hidden?.();
+    },
+    dispose() {},
+    onDidAccept(f: () => void) {
+      accepted = f;
+      return disposable();
+    },
+    onDidHide(f: () => void) {
+      hidden = f;
+      setTimeout(() => {
+        const chosen = stubState.quickPick ? stubState.quickPick(pick.items) : undefined;
+        if (chosen) {
+          pick.selectedItems = [chosen];
+          accepted?.();
+        } else {
+          pick.hide();
+        }
+      }, 0);
+      return disposable();
+    },
+  };
+  return pick;
+}
 
 const vscode = {
   Uri,
@@ -144,6 +188,8 @@ const vscode = {
     showQuickPick: async (items: { id?: string }[]) =>
       stubState.quickPick ? stubState.quickPick(items) : undefined,
 
+    createQuickPick,
+
     showTextDocument: async () => undefined,
 
     registerWebviewViewProvider: disposable,
@@ -167,7 +213,7 @@ const vscode = {
 
     textDocuments: [],
 
-    findFiles: async () => [],
+    findFiles: async () => stubState.files.map((f) => Uri.file(f)),
 
     onDidChangeConfiguration: event(),
     onDidChangeWorkspaceFolders: event(),
