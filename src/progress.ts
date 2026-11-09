@@ -217,14 +217,15 @@ export class PlanTracker {
    * for this plan when NEO's has dropped (src/progressMemory.ts) - and "Task 2 of 5 - Implement
    * JSON storage", the first task with a step still open (src/planOutline.ts).
    *
-   * `seq` is the newest NEO event seen: it dates the remembered count.
+   * `seq` is the newest NEO event seen: it dates the remembered count. `session` is the NEO work
+   * session on screen: a count remembered for another session is never shown for this one.
    */
-  view(backend: PlanProgress | null | undefined, phase: string | undefined, seq: number): PlanView {
+  view(backend: PlanProgress | null | undefined, phase: string | undefined, seq: number, session?: string): PlanView {
     if (backend && backend.total) this.refresh(backend);
     const outline = this.disk?.outline ?? this.memory.outline;
     const key = planKey(outline, this.memory.titles);
     const plan = key ? { key, steps: outline ? outline.stepTask.length : this.memory.titles.length } : undefined;
-    const r = reconcile({ backend, phase, plan, ticks: this.disk?.ticks, seq, record: this.memory.progress });
+    const r = reconcile({ backend, phase, plan, ticks: this.disk?.ticks, seq, record: this.memory.progress, session });
     if (r.record !== this.memory.progress) {
       this.memory = { ...this.memory, progress: r.record };
       this.persist();
@@ -750,12 +751,16 @@ export function buildLive(
     inProject &&
     connected &&
     Boolean(plan && plan.total > 0 && (/^(execute|review|finish|merge|done)/.test(phase) || plan.done > 0));
+  // Once Execute is over no task is being worked on: a finished plan reads "All N tasks done", and
+  // an unfinished one shows only its count - never an old task presented as the current one.
+  const afterExecute = /^(review|finish|merge|done)/.test(phase);
+  const shownTask = showPlan && task && (!afterExecute || task.complete) ? task : null;
 
   return {
     activity,
     label,
     detail,
-    task: showPlan ? task : null,
+    task: shownTask,
     progress: showPlan ? plan : null,
     action: working ? action : null,
     note: attention ?? (inProject ? (stopExplained ? stoppedNote : note ?? stoppedNote) : null),

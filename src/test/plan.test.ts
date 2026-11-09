@@ -8,7 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { currentTask, parsePlanOutline } from "../planOutline";
-import { GateEventLike, PlanArtifacts, StageLike, documentGates, outlineDocument, outlinePlan, statusOf } from "../plan";
+import { GateEventLike, PlanArtifacts, StageLike, documentGates, outlineDocument, outlinePlan, railStages, statusOf } from "../plan";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const vscode = require("vscode");
@@ -100,6 +100,29 @@ describe("which documents", () => {
     const stages = rail("plan").map((s) => (s.phase === "plan-gate" ? { ...s, phase: "planning-gate", label: "Build plan" } : s));
     const gates = documentGates(stages);
     assert.deepEqual(gates.map((s) => s.label), ["Design", "Build plan"]);
+  });
+});
+
+describe("the rail as drawn", () => {
+  const current = (stages: StageLike[]) => stages.filter((s) => s.state === "active").map((s) => s.label);
+
+  it("waiting at the review gate: Review is current, not Merge (NEO's label for that gate)", () => {
+    const drawn = railStages(rail("review-gate"), true, "review-gate");
+    assert.deepEqual(current(drawn), ["Review"]);
+    assert.equal(drawn.find((s) => s.phase === "review-gate")!.state, "waiting");
+    assert.equal(drawn.find((s) => s.phase === "finish")!.state, "pending");
+  });
+
+  it("after approval NEO's own stages are drawn as they are: the next stage becomes current", () => {
+    assert.deepEqual(current(railStages(rail("finish"), false)), ["Finish"]);
+    assert.equal(railStages(rail("finish"), false).find((s) => s.phase === "review-gate")!.state, "done");
+  });
+
+  it("changes nothing when no gate is waiting, or a different gate is open", () => {
+    const stages = rail("review-gate");
+    assert.equal(railStages(stages, false), stages, "a gate phase NEO has not opened for a decision yet");
+    assert.equal(railStages(stages, true, "plan-gate"), stages);
+    assert.deepEqual(current(railStages(rail("execute"), true)), ["Execute (TDD)"], "no active gate: nothing moves");
   });
 });
 

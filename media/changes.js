@@ -157,7 +157,10 @@
       return;
     }
     if (!s.files.length) {
-      box.appendChild(el("div", "chg-note", s.label ? `No file changes in ${s.label}.` : "No NEO work branch was found."));
+      // "none": nothing to compare was found (the label says why); otherwise a real, empty diff.
+      box.appendChild(el("div", "chg-note", s.source === "none"
+        ? `No changes found for this session: ${s.label || "no NEO work branch was found"}.`
+        : `No file changes in ${s.label}.`));
       return;
     }
     box.appendChild(el("div", "chg-label", s.label));

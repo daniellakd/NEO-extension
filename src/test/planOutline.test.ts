@@ -198,6 +198,7 @@ describe("currentTask - plans without task headings (checklist fallback)", () =>
     const t = currentTask({ done: 3, total: 3 }, [], titles);
     assert.equal(t?.index, 3);
     assert.equal(t?.title, "Write tests");
+    assert.equal(t?.complete, true, "drawn as 'All 3 tasks done', not as a current task");
   });
 
   it("shows numbers only when the titles known are for a different plan", () => {

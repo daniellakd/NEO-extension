@@ -27,6 +27,13 @@ export function samePath(a: string, b: string): boolean {
   return normalizePath(a) === normalizePath(b);
 }
 
+/** Whether `file` is `folder` itself or somewhere inside it. */
+export function insidePath(file: string, folder: string): boolean {
+  const f = normalizePath(file);
+  const d = normalizePath(folder);
+  return f === d || f.startsWith(d + (process.platform === "win32" ? "\\" : "/"));
+}
+
 /** The registered project that lives in this folder, if any. Archived projects are not listed. */
 export function projectForFolder(projects: Project[], folder: string): Project | undefined {
   return projects.find((p) => samePath(p.path, folder));

@@ -24,7 +24,7 @@ export interface CurrentTask {
   title?: string;
   /** Tasks whose every step is ticked ("task" only). */
   tasksDone?: number;
-  /** Every task is done ("task" only): there is no current task left to name. */
+  /** Every task (or checklist item) is done: there is no current task left to name. */
   complete?: boolean;
   /** The whole outline, for the tooltip ("task" only). */
   tasks?: { title: string; state: "done" | "current" | "todo" }[];
@@ -233,7 +233,7 @@ export function currentTask(
   }
 
   const known = titles.length === total ? titles : [];
-  if (done >= total) return { unit: "step", index: total, total, title: known[total - 1] };
+  if (done >= total) return { unit: "step", index: total, total, title: known[total - 1], complete: true };
   return { unit: "step", index: done + 1, total, title: known[done] };
 }
 

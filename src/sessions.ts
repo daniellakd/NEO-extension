@@ -267,6 +267,12 @@ export class SessionsController implements vscode.Disposable {
     if (moved || next.at - this.lastWrite > 60_000) this.write();
   }
 
+  /** The active session: its id and when NEO started it (null: none known, or a NEO without sessions). */
+  activeSession(): { id: string; createdAt: number } | null {
+    const s = this.activeId ? this.sessions?.find((x) => x.id === this.activeId) : undefined;
+    return s ? { id: s.id, createdAt: s.created_at } : null;
+  }
+
   view(): SessionsView {
     const rows = (this.sessions ?? []).map((s, i, all) => this.row(s, i, all.length));
     return {
