@@ -150,6 +150,17 @@ describe("buildLive - connection and phases", () => {
     assert.equal(live({ phase: "plan-gate", planProgress: { done: 0, total: 5 } }).progress, null);
   });
 
+  it("while a plan is being made, ticks NEO counts are an earlier session's plan: no rows, no task", () => {
+    // NEO counts the plan file on disk for the whole project; a new session starts on the last one's.
+    for (const phase of ["setup", "analysis", "brainstorm", "design-gate", "plan", "plan-gate"]) {
+      const l = live({ phase, planProgress: { done: 2, total: 2 } });
+      assert.equal(l.progress, null, phase);
+      assert.equal(l.task, null, phase);
+    }
+    // A phase this client does not know keeps showing a count under way.
+    assert.deepEqual(live({ phase: "custom-step", planProgress: { done: 1, total: 4 } }).progress, { done: 1, total: 4 });
+  });
+
   it("once Execute is over no task is presented as current; a finished plan says so", () => {
     const open = { unit: "task" as const, index: 3, total: 3, title: "Docs", tasksDone: 2, complete: false };
     const done = { unit: "step" as const, index: 6, total: 6, complete: true };

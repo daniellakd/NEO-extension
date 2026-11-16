@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
+  DEFAULT_SERVER_URL,
   Gate,
   NeoClient,
   NeoEvent,
@@ -1904,8 +1905,9 @@ const BRAND_MARK = `<svg class="brand-mark" viewBox="0 0 24 24" width="16" heigh
           <path d="M8.6 15.6V8.4l6.8 7.2V8.4" stroke-width="2.1"/>
         </svg>`;
 
-function serverUrl(): string {
-  const raw = vscode.workspace.getConfiguration("neo").get<string>("serverUrl") || "http://127.0.0.1:8720";
+/** `neo.serverUrl` as configured, or NEO's default address when it is not set. Exported for tests. */
+export function serverUrl(): string {
+  const raw = vscode.workspace.getConfiguration("neo").get<string>("serverUrl") || DEFAULT_SERVER_URL;
   return raw.replace(/\/+$/, "");
 }
 

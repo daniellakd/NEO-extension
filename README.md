@@ -7,7 +7,9 @@ phases, gates, checks and the whole pipeline run in NEO exactly as they do from 
 
 - VS Code 1.90 or later
 - Node.js 18 or later, with npm
-- A NEO installation. By default NEO runs at `http://127.0.0.1:8720`.
+- A NEO installation. By default NEO runs at `http://127.0.0.1:8000` (NEO-AG's `[orchestrator] port`
+  in `config/neoag.toml`). Releases of this extension before this one defaulted to `8720`; if you
+  set `neo.serverUrl` yourself, that value is still used as it is.
 
 ## Install and build
 

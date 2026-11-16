@@ -166,15 +166,16 @@ class PlanTracker {
      * for this plan when NEO's has dropped (src/progressMemory.ts) - and "Task 2 of 5 - Implement
      * JSON storage", the first task with a step still open (src/planOutline.ts).
      *
-     * `seq` is the newest NEO event seen: it dates the remembered count.
+     * `seq` is the newest NEO event seen: it dates the remembered count. `session` is the NEO work
+     * session on screen: a count remembered for another session is never shown for this one.
      */
-    view(backend, phase, seq) {
+    view(backend, phase, seq, session) {
         if (backend && backend.total)
             this.refresh(backend);
         const outline = this.disk?.outline ?? this.memory.outline;
         const key = (0, progressMemory_1.planKey)(outline, this.memory.titles);
         const plan = key ? { key, steps: outline ? outline.stepTask.length : this.memory.titles.length } : undefined;
-        const r = (0, progressMemory_1.reconcile)({ backend, phase, plan, ticks: this.disk?.ticks, seq, record: this.memory.progress });
+        const r = (0, progressMemory_1.reconcile)({ backend, phase, plan, ticks: this.disk?.ticks, seq, record: this.memory.progress, session });
         if (r.record !== this.memory.progress) {
             this.memory = { ...this.memory, progress: r.record };
             this.persist();
@@ -668,8 +669,10 @@ function buildLive(s, task, action, note) {
     let detail;
     if (!connected) {
         activity = "offline";
-        label = s.connection === "connecting" ? "connecting" : "not connected";
-        detail = "NEO is not reachable. Progress cannot be read until the connection is back.";
+        label = s.connection === "connecting" ? "connecting" : s.connection === "reconnecting" ? "reconnecting" : "not connected";
+        detail = s.connection === "reconnecting"
+            ? "NEO stopped answering. The sidebar keeps trying; the project and your draft are kept."
+            : "NEO is not reachable. Progress cannot be read until the connection is back.";
     }
     else if (!inProject) {
         activity = "loading";
@@ -726,16 +729,25 @@ function buildLive(s, task, action, note) {
         ? { tone: "info", text: "Turn stopped - nothing was undone. Send a message to continue." }
         : null;
     // A plan is worth showing once there is one to be part-way through. Before Execute the plan
-    // gate card itself is on screen, so an untouched "0 of 8" there would only repeat it.
+    // gate card itself is on screen, so an untouched "0 of 8" there would only repeat it. While a
+    // plan is being made (setup through the plan gate) nothing of it can be ticked yet: NEO counts
+    // the plan file on disk for the whole project, so any ticks then are an earlier session's
+    // finished plan, not this work's. A phase this client does not know shows a count under way.
     const plan = s.planProgress;
     const showPlan = inProject &&
         connected &&
-        Boolean(plan && plan.total > 0 && (/^(execute|review|finish|merge|done)/.test(phase) || plan.done > 0));
+        Boolean(plan &&
+            plan.total > 0 &&
+            (/^(execute|review|finish|merge|done)/.test(phase) || (plan.done > 0 && (0, progressMemory_1.stageOf)(phase) !== "before")));
+    // Once Execute is over no task is being worked on: a finished plan reads "All N tasks done", and
+    // an unfinished one shows only its count - never an old task presented as the current one.
+    const afterExecute = /^(review|finish|merge|done)/.test(phase);
+    const shownTask = showPlan && task && (!afterExecute || task.complete) ? task : null;
     return {
         activity,
         label,
         detail,
-        task: showPlan ? task : null,
+        task: shownTask,
         progress: showPlan ? plan : null,
         action: working ? action : null,
         note: attention ?? (inProject ? (stopExplained ? stoppedNote : note ?? stoppedNote) : null),

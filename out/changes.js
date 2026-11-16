@@ -28,6 +28,7 @@ exports.changesPhase = changesPhase;
 exports.worktrees = worktrees;
 exports.computeChanges = computeChanges;
 const child_process_1 = require("child_process");
+const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const workspace_1 = require("./workspace");
@@ -35,13 +36,18 @@ const workspace_1 = require("./workspace");
  * What NEO produced: the files the current work changed, with native diffs of each.
  *
  * NEO's own /diff compares the project root with main, and the root stays on main while Execute
- * works in `<project>/.worktrees/<name>` on `work/<name>` — so it is empty exactly when the user
- * needs it. The extension runs on the same machine and reads git itself:
+ * works in `<project>/.worktrees/<name>` (on `work/<name>`, or a branch such as `feature/health`
+ * for a quick change) — so it is empty exactly when the user needs it. The extension runs on the
+ * same machine and reads git itself:
  *
- *   - while the worktree exists: its working tree against the point it branched from main, so
- *     uncommitted edits count too;
- *   - after Finish has merged and removed it: the merge commit NEO left on main, against its
- *     first parent.
+ *   - while a worktree exists: its working tree against the point it branched from the base
+ *     branch, so uncommitted edits count too;
+ *   - work on a branch checked out in the project folder itself: the same, in the project folder;
+ *   - after Finish has merged and removed it: the merge commit NEO left on the base branch, against
+ *     its first parent - only one made since the current session started.
+ *
+ * The base branch is never assumed: it is the project folder's own branch when that is a base
+ * (main, master, the remote's default…), else the first of those that exists in the repository.
  *
  * Read-only throughout: `execFile` (no shell), an allow-list of reading commands, and both sides
  * of a diff are virtual documents. Nothing is ever written to the project or its worktree — NEO
@@ -61,12 +67,19 @@ const DONE_INTERVAL_MS = 60_000;
 const MAX_FILES = 300;
 const MAX_COUNTED_BYTES = 2 * 1024 * 1024;
 const READ_ONLY = new Set(["worktree", "diff", "show", "log", "merge-base", "rev-parse", "ls-files"]);
+// Branch names that are a base, not work, after the remote's own default (origin/HEAD).
+const BASE_NAMES = ["main", "master", "trunk", "develop"];
+// A merge made this long before the session's start (NEO's clock vs the commit's) is still its own.
+const SINCE_SLACK_S = 120;
 class GitError extends Error {
 }
 function git(cwd, args) {
     if (!READ_ONLY.has(args[0]) || (args[0] === "worktree" && args[1] !== "list")) {
         return Promise.reject(new GitError(`git ${args[0]} is not a read-only command`));
     }
+    // A missing folder makes the spawn itself fail with ENOENT, which would read as "git not found".
+    if (!fs.existsSync(cwd))
+        return Promise.reject(new GitError(`the folder ${cwd} does not exist`));
     return new Promise((resolve, reject) => {
         (0, child_process_1.execFile)("git", ["--no-pager", "-c", "color.ui=false", "-c", "core.quotepath=false", ...args], {
             cwd,
@@ -94,11 +107,75 @@ async function worktrees(projectPath) {
             list.push({ path: path.normalize(line.slice(9)), branch: null });
         else if (line.startsWith("branch ") && list.length)
             list[list.length - 1].branch = line.slice(7).replace(/^refs\/heads\//, "");
+        else if (line.startsWith("prunable") && list.length)
+            list[list.length - 1].prunable = true;
     }
-    const root = list.find((w) => (0, workspace_1.normalizePath)(w.path) === (0, workspace_1.normalizePath)(projectPath)) ?? list[0] ?? null;
-    const inside = (0, workspace_1.normalizePath)(path.join(projectPath, ".worktrees")) + path.sep;
-    const work = list.find((w) => w !== root && (0, workspace_1.normalizePath)(w.path).startsWith(inside)) ?? null;
-    return { root, work };
+    // git reports real paths; the project's may be spelled through a symlink or a Windows short name.
+    const root = list.find((w) => realPath(w.path) === realPath(projectPath)) ?? list[0] ?? null;
+    const inside = realPath(path.join(projectPath, ".worktrees")) + path.sep;
+    // A worktree whose folder is gone (removed, not yet pruned) has nothing to read: git there fails.
+    const candidates = list.filter((w) => w !== root && !w.prunable && fs.existsSync(w.path) && realPath(w.path).startsWith(inside));
+    return { root, work: await newest(candidates) };
+}
+/** A folder's real path, normalised for comparing; as given when it cannot be resolved. */
+function realPath(p) {
+    try {
+        return (0, workspace_1.normalizePath)(fs.realpathSync.native(p));
+    }
+    catch {
+        return (0, workspace_1.normalizePath)(p);
+    }
+}
+/** Of several NEO worktrees (an older one left behind), the one committed to most recently. */
+async function newest(list) {
+    if (list.length <= 1)
+        return list[0] ?? null;
+    let best = null;
+    let bestAt = -1;
+    for (const w of list) {
+        let at;
+        try {
+            at = Number((await git(w.path, ["log", "-1", "--format=%ct", "HEAD"])).trim()) || 0;
+        }
+        catch {
+            continue;
+        }
+        if (at >= bestAt) {
+            best = w;
+            bestAt = at;
+        }
+    }
+    return best;
+}
+async function exists(cwd, ref) {
+    try {
+        await git(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * The base branches this repository has, best first: the remote's default (origin/HEAD), then the
+ * usual names. Only ones that resolve to a commit - an unborn `master` from `git init` is not one.
+ */
+async function baseBranches(cwd) {
+    const names = new Set();
+    try {
+        const head = (await git(cwd, ["rev-parse", "--abbrev-ref", "origin/HEAD"])).trim();
+        if (head && head !== "origin/HEAD")
+            names.add(head.replace(/^origin\//, ""));
+    }
+    catch {
+        /* no remote, or no default recorded for it */
+    }
+    BASE_NAMES.forEach((n) => names.add(n));
+    const existing = [];
+    for (const n of names)
+        if (await exists(cwd, n))
+            existing.push(n);
+    return { names, existing };
 }
 /** `git diff --numstat` and `--name-status` together: one entry per path, renames followed. */
 async function diffFiles(cwd, revs) {
@@ -166,35 +243,59 @@ function summarize(project, base, all) {
         truncated: all.length > files.length,
     };
 }
-async function computeChanges(projectPath) {
-    const { root, work } = await worktrees(projectPath);
-    const baseBranch = root?.branch ?? "main";
-    if (work) {
-        // Where the work left main, and everything since — committed or not — in the worktree.
-        const baseRef = (await git(work.path, ["merge-base", baseBranch, "HEAD"])).trim();
-        const tracked = await diffFiles(work.path, [baseRef]);
-        const others = (await git(work.path, ["ls-files", "--others", "--exclude-standard", "-z"]))
-            .split("\0")
-            .filter(Boolean);
-        const untracked = await Promise.all(others.slice(0, MAX_FILES).map((rel) => untrackedFile(work.path, rel)));
-        const branch = work.branch ?? "the worktree";
-        return summarize(projectPath, {
-            source: "work",
-            label: `${branch} vs ${baseBranch}`,
-            repo: work.path,
-            baseRef,
-            baseName: baseBranch,
-            targetName: branch,
-        }, [...tracked, ...untracked]);
+/** git's own words for a folder that is not a repository, said for what the user sees. */
+function repositoryError(projectPath, err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/not a git repository/i.test(message)) {
+        return new GitError(`the project folder is not a git repository (${projectPath}), so NEO's changes cannot be compared.`);
     }
-    // No worktree: the work was merged (or never started). NEO's Finish merges `work/<name>` with a
-    // merge commit, so the newest one on the base branch's own line is this work's final result.
-    const log = await git(projectPath, ["log", "--first-parent", "--merges", "-n", "50", "--format=%H%x00%P%x00%s", baseBranch]);
+    return err instanceof GitError ? err : new GitError(message);
+}
+/**
+ * The current work's changes. `since` is when the current NEO session started (seconds, NEO's
+ * clock): a merge older than that belongs to an earlier session and is not shown as this one's.
+ */
+async function computeChanges(projectPath, since) {
+    let root;
+    let work;
+    try {
+        ({ root, work } = await worktrees(projectPath));
+    }
+    catch (err) {
+        throw repositoryError(projectPath, err);
+    }
+    const bases = await baseBranches(projectPath);
+    const rootBranch = root?.branch && (await exists(projectPath, root.branch)) ? root.branch : undefined;
+    const rootIsBase = Boolean(rootBranch && bases.names.has(rootBranch));
+    if (work) {
+        // Where the work left its base, and everything since — committed or not — in the worktree.
+        const base = [rootIsBase ? rootBranch : undefined, ...bases.existing, rootBranch].find((b) => b && b !== work.branch);
+        if (!base)
+            throw new GitError(noBase(projectPath, bases.names));
+        return workingTree(projectPath, work.path, work.branch ?? "the worktree", base);
+    }
+    // No worktree, and the project folder itself on a branch that is not a base: the work is being
+    // done right there (a quick change on e.g. `feature/health`).
+    if (rootBranch && !rootIsBase && bases.existing.length) {
+        return workingTree(projectPath, projectPath, rootBranch, bases.existing[0]);
+    }
+    const baseBranch = rootBranch ?? bases.existing[0];
+    if (!baseBranch)
+        throw new GitError(noBase(projectPath, bases.names));
+    // No work in progress: the work was merged (or never started). NEO's Finish merges the work
+    // branch with a merge commit, so the newest one on the base branch's own line - made since this
+    // session began - is this work's final result.
+    const log = await git(projectPath, ["log", "--first-parent", "--merges", "-n", "50", "--format=%H%x00%P%x00%ct%x00%s", baseBranch]);
     for (const line of log.split("\n")) {
-        const [sha, parents, subject] = line.split("\0");
-        if (!sha || !/^Merge branch '(work\/[^']+)'/.test(subject ?? ""))
+        const [sha, parents, time, subject] = line.split("\0");
+        if (!sha)
             continue;
-        const branch = /^Merge branch '([^']+)'/.exec(subject)[1];
+        if (since !== undefined && Number(time) < since - SINCE_SLACK_S)
+            break; // newest first: the rest are older
+        const merged = /^Merge (?:remote-tracking )?branch '([^']+)'/.exec(subject ?? "");
+        if (!merged)
+            continue;
+        const branch = merged[1];
         const firstParent = parents.split(" ")[0];
         const files = await diffFiles(projectPath, [firstParent, sha]);
         return summarize(projectPath, {
@@ -207,7 +308,31 @@ async function computeChanges(projectPath) {
             targetName: `merge ${sha.slice(0, 7)}`,
         }, files);
     }
-    return summarize(projectPath, { source: "none", label: "" }, []);
+    const when = since !== undefined ? " since this session started" : "";
+    return summarize(projectPath, {
+        source: "none",
+        label: `no NEO work branch is checked out, and nothing was merged into ${baseBranch}${when}`,
+    }, []);
+}
+/** A tree being worked in, against the point its branch left `base`: commits, edits and new files. */
+async function workingTree(projectPath, repo, branch, base) {
+    const baseRef = (await git(repo, ["merge-base", base, "HEAD"])).trim();
+    const tracked = await diffFiles(repo, [baseRef]);
+    const others = (await git(repo, ["ls-files", "--others", "--exclude-standard", "-z"]))
+        .split("\0")
+        .filter(Boolean);
+    const untracked = await Promise.all(others.slice(0, MAX_FILES).map((rel) => untrackedFile(repo, rel)));
+    return summarize(projectPath, {
+        source: "work",
+        label: `${branch} vs ${base}`,
+        repo,
+        baseRef,
+        baseName: base,
+        targetName: branch,
+    }, [...tracked, ...untracked]);
+}
+function noBase(projectPath, names) {
+    return `no base branch to compare with was found in ${projectPath} (looked for ${[...names].join(", ")}).`;
 }
 /**
  * Keeps one snapshot of the current project's changes, recomputed as NEO works, and opens diffs
@@ -220,6 +345,9 @@ class ChangesController {
     posted = "";
     key = "";
     projectPath;
+    /** The session the snapshot is for, and when it started (see computeChanges). */
+    session;
+    since;
     last = 0;
     running = false;
     rerun = false;
@@ -233,12 +361,13 @@ class ChangesController {
     dispose() {
         this.registration.dispose();
     }
-    update(project, phase) {
+    update(project, phase, session) {
         const relevant = Boolean(project && phase && RELEVANT.has(phase));
-        const key = relevant ? `${project.path}|${phase}` : "";
+        const key = relevant ? `${project.path}|${phase}|${session?.id ?? ""}` : "";
         if (!relevant) {
             this.key = key;
             this.projectPath = undefined;
+            this.session = undefined;
             if (this.snapshot) {
                 this.snapshot = null;
                 this.publish();
@@ -248,8 +377,15 @@ class ChangesController {
         const interval = phase === "done" ? DONE_INTERVAL_MS : LIVE_INTERVAL_MS;
         if (key === this.key && Date.now() - this.last < interval)
             return;
+        // Another session's changes are never shown for this one, not even until the new read is in.
+        if (this.snapshot && session?.id !== this.session) {
+            this.snapshot = null;
+            this.publish();
+        }
         this.key = key;
         this.projectPath = project.path;
+        this.session = session?.id;
+        this.since = session?.since;
         void this.run();
     }
     /** The changes last computed for this project, or null while there are none (yet). */
@@ -292,7 +428,7 @@ class ChangesController {
         this.last = Date.now();
         let next;
         try {
-            next = await computeChanges(projectPath);
+            next = await computeChanges(projectPath, this.since);
         }
         catch (err) {
             next = { project: projectPath, source: "none", label: "", files: [], additions: 0, deletions: 0, truncated: false, error: err instanceof Error ? err.message : String(err) };

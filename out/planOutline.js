@@ -193,7 +193,7 @@ function currentTask(progress, plans, titles) {
     }
     const known = titles.length === total ? titles : [];
     if (done >= total)
-        return { unit: "step", index: total, total, title: known[total - 1] };
+        return { unit: "step", index: total, total, title: known[total - 1], complete: true };
     return { unit: "step", index: done + 1, total, title: known[done] };
 }
 function byTask(outline, ticks) {

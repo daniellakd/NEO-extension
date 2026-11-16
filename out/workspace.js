@@ -26,6 +26,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.currentFolder = currentFolder;
 exports.normalizePath = normalizePath;
 exports.samePath = samePath;
+exports.insidePath = insidePath;
 exports.projectForFolder = projectForFolder;
 exports.neoSlug = neoSlug;
 const path = __importStar(require("path"));
@@ -52,6 +53,12 @@ function normalizePath(p, platform = process.platform) {
 }
 function samePath(a, b) {
     return normalizePath(a) === normalizePath(b);
+}
+/** Whether `file` is `folder` itself or somewhere inside it. */
+function insidePath(file, folder) {
+    const f = normalizePath(file);
+    const d = normalizePath(folder);
+    return f === d || f.startsWith(d + (process.platform === "win32" ? "\\" : "/"));
 }
 /** The registered project that lives in this folder, if any. Archived projects are not listed. */
 function projectForFolder(projects, folder) {

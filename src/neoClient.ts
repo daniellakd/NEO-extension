@@ -272,7 +272,13 @@ export class NeoClient {
   }
 }
 
-/** "127.0.0.1:8720" out of "http://127.0.0.1:8720/". */
+/**
+ * Where NEO serves by default: NEO-AG's own default port (config/neoag.toml, `[orchestrator] port`),
+ * which is 8000. `neo.serverUrl`'s default in package.json must be this same string.
+ */
+export const DEFAULT_SERVER_URL = "http://127.0.0.1:8000";
+
+/** "127.0.0.1:8000" out of "http://127.0.0.1:8000/". */
 export function hostOf(baseUrl: string): string {
   try {
     return new URL(baseUrl).host;

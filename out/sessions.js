@@ -28,6 +28,7 @@ exports.snapshotUri = snapshotUri;
 const vscode = __importStar(require("vscode"));
 const neoClient_1 = require("./neoClient");
 const sessionHistory_1 = require("./sessionHistory");
+const errors_1 = require("./errors");
 /**
  * Sessions, history and resume for the sidebar (the pure rules are in src/sessionHistory.ts).
  *
@@ -220,6 +221,11 @@ class SessionsController {
         if (moved || next.at - this.lastWrite > 60_000)
             this.write();
     }
+    /** The active session: its id and when NEO started it (null: none known, or a NEO without sessions). */
+    activeSession() {
+        const s = this.activeId ? this.sessions?.find((x) => x.id === this.activeId) : undefined;
+        return s ? { id: s.id, createdAt: s.created_at } : null;
+    }
     view() {
         const rows = (this.sessions ?? []).map((s, i, all) => this.row(s, i, all.length));
         return {
@@ -264,7 +270,8 @@ class SessionsController {
             this.kinds = data.kinds;
         }
         catch (err) {
-            void vscode.window.showErrorMessage(`NEO: could not read the sessions: ${err instanceof Error ? err.message : String(err)}`);
+            // A read: Retry is safe.
+            void (0, errors_1.notifyError)((0, errors_1.describeError)(err, "loadSessions"), () => this.pick());
             return;
         }
         if (projectId !== this.projectId)
@@ -426,7 +433,13 @@ class SessionsController {
             });
         }
         catch (err) {
-            return `# Session unavailable\n\nNEO could not be read: ${err instanceof Error ? err.message : String(err)}\n`;
+            // The summary up front; the technical detail folded, as in the sidebar.
+            const shown = (0, errors_1.describeError)(err, "loadSessions");
+            const fence = "```";
+            const details = shown.detail
+                ? `\n\n<details><summary>Show details</summary>\n\n${fence}\n${shown.detail}\n${fence}\n\n</details>`
+                : "";
+            return `# Session unavailable\n\n${(0, errors_1.plainText)(shown)}${details}\n`;
         }
     }
     // --- helpers ----------------------------------------------------------------------------

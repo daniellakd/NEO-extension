@@ -210,8 +210,8 @@
       "properties": {
         "neo.serverUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:8720",
-          "markdownDescription": "Base URL of the running NEO server, e.g. `http://127.0.0.1:8720`. The extension never starts NEO: start it separately, then use **NEO: Connect** (or Retry in the sidebar)."
+          "default": "http://127.0.0.1:8000",
+          "markdownDescription": "Base URL of the running NEO server, e.g. `http://127.0.0.1:8000` (NEO-AG's default port). The extension never starts NEO: start it separately, then use **NEO: Connect** (or Retry in the sidebar)."
         }
       }
     }
