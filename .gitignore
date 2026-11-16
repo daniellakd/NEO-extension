@@ -1,0 +1,9 @@
+# Dependencies come from package.json + package-lock.json (npm ci). Files under node_modules/ that
+# were committed before this file existed stay tracked; ignoring only stops new ones being added.
+node_modules/
+
+# Built packages (npm run package) are release artifacts, not sources.
+*.vsix
+
+# Compiled tests: out/ is tracked for the runtime only.
+out/test/

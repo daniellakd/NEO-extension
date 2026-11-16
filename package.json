@@ -2,10 +2,14 @@
   "name": "neo-vscode",
   "displayName": "NEO",
   "description": "Chat with the local NEO orchestrator from VS Code. A thin client: the pipeline, gates and checks stay in NEO. Powered by CodeValue.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "neoag",
   "private": true,
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daniellakd/NEO-extension.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -220,11 +224,14 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test \"out/test/**/*.test.js\"",
-    "vscode:prepublish": "npm run compile"
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --no-dependencies --skip-license",
+    "package:ls": "vsce ls --no-dependencies"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "~1.90.0",
+    "@vscode/vsce": "^4.1.1",
     "typescript": "~5.6.3"
   }
 }
