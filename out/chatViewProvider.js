@@ -24,6 +24,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ChatViewProvider = void 0;
+exports.serverUrl = serverUrl;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
@@ -35,6 +36,7 @@ const plan_1 = require("./plan");
 const sessionHistory_1 = require("./sessionHistory");
 const sessions_1 = require("./sessions");
 const sseStream_1 = require("./sseStream");
+const errors_1 = require("./errors");
 const workspace_1 = require("./workspace");
 /**
  * The sidebar: one webview, one NEO project (the one living in the open folder).
@@ -59,6 +61,9 @@ const IGNORED_KINDS = new Set(["hello", "usage", "reasoning", "permission", "sig
 const STOP_SETTLE_MS = 30_000;
 // NEO's POST /sessions takes a request of at most this many characters (app.py SessionIn).
 const SESSION_REQUEST_MAX = 20_000;
+// Consecutive failed reads of an open project before "Reconnecting…" becomes "NEO is offline". The
+// reads keep going either way (the 10-second resync and the stream's own backoff).
+const OFFLINE_AFTER = 3;
 const DONE_REFUSAL = "This session is complete, so the message was not sent into it. Press Send again to start a new " +
     "session with it - the completed one stays as read-only history.";
 class ChatViewProvider {
@@ -83,9 +88,21 @@ class ChatViewProvider {
     resyncSeq = 0;
     resyncApplied = 0;
     resyncing = false;
+    // Consecutive failed reads; see OFFLINE_AFTER. And, with no project open, the slow check for NEO
+    // coming up, so a first run connects on its own once the server is started.
+    failures = 0;
+    offlineTimer;
+    // A reload of the open project failed, so it has no stream: the next good read reloads it.
+    orphaned = false;
     // Attached context lives here, not in the webview: a selection is a snapshot only the host can
     // take, and the chips survive the webview reloading.
     attachments = [];
+    // The message box's text as the webview last reported it, and each other project's unsent text
+    // and chips: switching projects puts away one project's composer and brings back the other's.
+    draft = "";
+    composers = new Map();
+    // Repeated announcements of one gate visit are drawn once (src/sessionHistory.ts).
+    gateVisits = new sessionHistory_1.GateVisits();
     // Live progress. The plan is remembered per project; the action and the notice are whatever the
     // newest events said. None of them decides anything: they only describe what NEO reported.
     plan;
@@ -139,6 +156,7 @@ class ChatViewProvider {
         view.onDidChangeVisibility?.(() => this.postState());
     }
     dispose() {
+        this.stopOfflinePoll();
         this.stopProject();
         if (this.editorTimer)
             clearTimeout(this.editorTimer);
@@ -163,10 +181,15 @@ class ChatViewProvider {
         const e = this.lastEditor;
         return e && !e.document.isClosed ? e : undefined;
     }
-    /** What one click on the suggested chip would attach: the selection if there is one. */
+    /**
+     * What one click on the suggested chip would attach: the selection if there is one. Only a file of
+     * the project on screen is offered - after a switch to another project, the editor's file belongs
+     * to the one left behind.
+     */
     suggestion() {
         const e = this.editor();
-        if (!e)
+        const project = this.state.project;
+        if (!e || !project || !(0, workspace_1.insidePath)(e.document.uri.fsPath, project.path))
             return null;
         const rel = vscode.workspace.asRelativePath(e.document.uri, false);
         const lines = e.selection.isEmpty ? undefined : (0, context_1.selectedLines)(e.selection);
@@ -191,19 +214,8 @@ class ChatViewProvider {
             kind = "choose";
         else if (source === "suggested")
             kind = editor && !editor.selection.isEmpty ? "selection" : "file";
-        else {
-            const items = [];
-            if (editor) {
-                const rel = vscode.workspace.asRelativePath(editor.document.uri, false);
-                items.push({ action: "file", label: "$(file) Current file", description: rel });
-                if (!editor.selection.isEmpty) {
-                    const lines = (0, context_1.selectedLines)(editor.selection);
-                    items.push({ action: "selection", label: "$(selection) Current selection", description: (0, context_1.labelOf)({ path: rel, lines }) });
-                }
-            }
-            items.push({ action: "choose", label: "$(search) Choose file…", description: "from this workspace" });
-            kind = (await vscode.window.showQuickPick(items, { title: "Add context to your NEO message" }))?.action;
-        }
+        else
+            kind = await this.pickContextAction(editor);
         if (!kind)
             return;
         if (this.attachments.length >= context_1.MAX_ITEMS) {
@@ -241,6 +253,29 @@ class ChatViewProvider {
             this.post({ type: "atResolved" });
         this.postState();
     }
+    /**
+     * The + menu: the same three actions every time, each saying what it would attach or why it cannot
+     * yet. "Add Workspace File" is exactly what typing "@" does; all three end in addContext's one
+     * attach path, with its limits and checks.
+     */
+    async pickContextAction(editor) {
+        const rel = editor ? vscode.workspace.asRelativePath(editor.document.uri, false) : undefined;
+        const lines = editor && !editor.selection.isEmpty ? (0, context_1.selectedLines)(editor.selection) : undefined;
+        const items = [
+            { action: "file", label: "$(file) Add Current File", description: rel ?? "no file is open in the editor" },
+            {
+                action: "selection",
+                label: "$(selection) Add Selection",
+                description: rel && lines ? (0, context_1.labelOf)({ path: rel, lines }) : "select lines in the editor first",
+            },
+            { action: "choose", label: "$(search) Add Workspace File…", description: "search this workspace's files (same as typing @)" },
+        ];
+        const picked = await vscode.window.showQuickPick(items, {
+            title: "Add context to your NEO message",
+            placeHolder: `Attach up to ${context_1.MAX_ITEMS} files or selections; each is shown as a chip until you send`,
+        });
+        return picked?.action;
+    }
     removeContext(id) {
         this.attachments = this.attachments.filter((a) => a.id !== id);
         this.postState();
@@ -248,11 +283,42 @@ class ChatViewProvider {
     clearContext() {
         this.attachments = [];
     }
-    /** NEO: Connect — also what a changed setting or workspace leads to. */
+    /**
+     * Leave the project on screen for another one: its unsent text and chips are put away under its
+     * id, and the other project's are brought back - or an empty box, if it has none. Context gathered
+     * for one project never shows in another. Reloading the same project (Retry, a reconnect, a new
+     * session) does not come through here, so those keep the composer as it is.
+     */
+    switchComposer(to) {
+        const from = this.state.project?.id;
+        if (from === to && from !== undefined)
+            return;
+        if (from !== undefined) {
+            if (this.draft.trim() || this.attachments.length) {
+                this.composers.set(from, { draft: this.draft, attachments: this.attachments });
+            }
+            else {
+                this.composers.delete(from);
+            }
+        }
+        const next = to !== undefined ? this.composers.get(to) : undefined;
+        if (to !== undefined)
+            this.composers.delete(to);
+        this.attachments = next?.attachments ?? [];
+        this.draft = next?.draft ?? "";
+        this.post({ type: "composer", text: this.draft });
+    }
+    /**
+     * Start over: a changed setting or workspace leads here, and so does Retry when no project is
+     * open. Everything is read again from NEO; attached context was gathered for the old state.
+     */
     async connect() {
         this.client = new neoClient_1.NeoClient(serverUrl());
+        this.stopOfflinePoll();
         this.stopProject();
-        this.clearContext();
+        // The project on screen keeps its unsent text and chips for when it is shown again.
+        this.switchComposer(undefined);
+        this.failures = 0;
         const gen = ++this.generation;
         const folder = (0, workspace_1.currentFolder)();
         this.state = {
@@ -268,10 +334,8 @@ class ChatViewProvider {
         catch (err) {
             if (gen !== this.generation)
                 return;
-            this.state.connection = "unreachable";
-            this.state.connectionError = errorText(err);
             this.state.mode = folder ? "noProject" : "noFolder";
-            this.postState();
+            this.fail(err, "connect");
             return;
         }
         if (gen !== this.generation)
@@ -288,6 +352,7 @@ class ChatViewProvider {
             if (gen !== this.generation)
                 return;
             if (match) {
+                this.switchComposer(match.id);
                 await this.loadProject(match.id, gen);
             }
             else {
@@ -298,12 +363,45 @@ class ChatViewProvider {
         catch (err) {
             if (gen !== this.generation)
                 return;
-            this.fail(err);
+            this.state.mode = "noProject";
+            this.fail(err, "listProjects");
         }
+    }
+    /**
+     * NEO: Connect, and every Retry button. With a project on screen it stays there: the same project
+     * is read again and its stream reopened, and the draft, the attached context and the header are
+     * kept. Without one, this is `connect()`. Only reads are repeated; nothing is sent to NEO.
+     */
+    async retry() {
+        const project = this.state.project;
+        if (!project || this.state.mode !== "project")
+            return this.connect();
+        if (this.state.retrying)
+            return;
+        this.state.retrying = true;
+        this.postState();
+        try {
+            // NEO first: a down server leaves the stream and the resync running as they are.
+            this.state.runtimeReachable = Boolean((await this.client.status()).opencode_reachable);
+        }
+        catch (err) {
+            this.state.retrying = false;
+            this.noteDown(err, true);
+            return;
+        }
+        this.state.retrying = false;
+        if (project !== this.state.project)
+            return; // switched away meanwhile
+        this.noteUp();
+        const gen = ++this.generation;
+        this.stopProject();
+        await this.loadProject(project.id, gen);
     }
     /** NEO: Refresh — re-read everything for the current project, or reconnect if there is none. */
     async refresh() {
-        if (this.state.project && this.state.connection === "connected") {
+        if (this.state.project && this.state.mode === "project") {
+            if (this.state.connection !== "connected")
+                return this.retry();
             const gen = ++this.generation;
             this.stopProject();
             await this.loadProject(this.state.project.id, gen);
@@ -312,8 +410,46 @@ class ChatViewProvider {
             await this.connect();
         }
     }
+    /**
+     * An action that needs NEO, asked for while it is not reachable (the title bar and the Command
+     * Palette stay enabled): say why it cannot run, and offer what can fix it.
+     */
+    async explainOffline(what) {
+        const text = this.state.connection === "unreachable"
+            ? `NEO is offline. ${what} needs the NEO server at ${this.client.baseUrl}. Start NEO, then Retry.`
+            : `NEO is reconnecting. ${what} needs a confirmed connection to ${this.client.baseUrl}; try again once the sidebar says Connected.`;
+        const picked = await vscode.window.showWarningMessage(text, "Retry", errors_1.OPEN_SETTINGS);
+        if (picked === "Retry")
+            await this.retry();
+        else if (picked === errors_1.OPEN_SETTINGS)
+            await (0, errors_1.openSettings)();
+    }
+    /** See ViewState.ready. */
+    isReady() {
+        const s = this.state;
+        // The header's own rule for "Connected" (media/chat.js): a dropped stream reads "Reconnecting…".
+        return s.connection === "connected" && s.stream !== "reconnecting";
+    }
+    /**
+     * A change to NEO's state asked for while the connection is not confirmed (the webview disables
+     * these, so this is the backstop): nothing is sent. Returns true when the action may go ahead.
+     */
+    confirmReady() {
+        if (this.isReady())
+            return true;
+        void this.explainOffline("This action");
+        return false;
+    }
+    /** NEO has stopped answering (not merely still being connected to). */
+    offlineNow() {
+        return this.state.connection === "unreachable" || this.state.connection === "reconnecting";
+    }
     /** NEO: New Project — show the form. */
     showNewProject() {
+        if (this.offlineNow()) {
+            void this.explainOffline("Creating a project");
+            return;
+        }
         const folder = this.state.folder;
         this.post({
             type: "showNewProject",
@@ -328,17 +464,20 @@ class ChatViewProvider {
      * stream. Nothing is sent to it, so switching never starts work or a session.
      */
     async switchProject() {
+        if (this.offlineNow()) {
+            void this.explainOffline("The project list");
+            return;
+        }
         let projects;
         try {
             projects = await this.client.listProjects();
         }
         catch (err) {
-            if (err instanceof neoClient_1.NeoUnreachable) {
-                this.state.connection = "unreachable";
-                this.state.connectionError = err.message;
-                this.postState();
-            }
-            void vscode.window.showErrorMessage(`NEO: ${errorText(err)}`);
+            const shown = (0, errors_1.describeError)(err, "listProjects");
+            if (shown.offline)
+                this.wentOffline(err, shown);
+            // Listing is a read: retrying it is safe.
+            void (0, errors_1.notifyError)(shown, () => this.switchProject());
             return;
         }
         if (!projects.length) {
@@ -378,7 +517,7 @@ class ChatViewProvider {
         // matters: the new project's events have their own, possibly lower, sequence numbers.
         this.post({ type: "history", events: [] });
         this.post({ type: "gateDone" }); // no comment or refusal carries across
-        this.clearContext(); // context was gathered for the other project
+        this.switchComposer(picked.id); // each project keeps its own draft and context
         this.state.project = undefined;
         await this.loadProject(picked.id, gen);
     }
@@ -392,6 +531,11 @@ class ChatViewProvider {
         return Boolean(project && folder && (0, workspace_1.samePath)(project.path, folder));
     }
     openInBrowser() {
+        // The Web UI is served by the NEO server itself: offline, the browser would open on nothing.
+        if (this.offlineNow()) {
+            void this.explainOffline("The NEO Web UI");
+            return;
+        }
         const id = this.state.project?.id;
         const url = this.client.baseUrl + (id ? `/?project=${encodeURIComponent(id)}` : "/");
         void vscode.env.openExternal(vscode.Uri.parse(url));
@@ -460,7 +604,9 @@ class ChatViewProvider {
             return;
         }
         if (!snap.files.length) {
-            info(`no files changed${snap.label ? ` (${snap.label})` : ""}.`);
+            info(snap.source === "none"
+                ? `no changes found for the current session of ${project.name}: ${snap.label || "no NEO work branch or merge was found"}.`
+                : `no files changed (${snap.label}).`);
             return;
         }
         const count = (n, sign) => (n === null ? "binary" : `${sign}${n}`);
@@ -510,9 +656,13 @@ class ChatViewProvider {
         if ((0, changes_1.changesPhase)(this.state.phase)) {
             const snap = this.changes.current(project.path);
             const n = snap ? snap.files.length : 0;
+            // The same count the Changes strip and the review gate show ("300+" when the list is cut).
             items.push({
                 label: "$(diff) Changes",
-                description: snap ? `${n} file${n === 1 ? "" : "s"}` : "reading…",
+                description: !snap ? "reading…"
+                    : snap.error ? "could not read git"
+                        : snap.source === "none" ? "no changes found"
+                            : `${n}${snap.truncated ? "+" : ""} file${n === 1 && !snap.truncated ? "" : "s"}`,
                 detail: "Open a changed file's diff",
                 go: () => this.openChanges(),
             });
@@ -534,15 +684,28 @@ class ChatViewProvider {
     }
     // --- project lifecycle ------------------------------------------------------------------
     async loadProject(id, gen) {
-        this.state.mode = "loading";
-        this.postState();
+        // Reloading the project on screen (Refresh, Retry, a new session) keeps it on screen meanwhile.
+        const reload = this.state.mode === "project" && this.state.project?.id === id;
+        this.orphaned = false;
+        if (!reload) {
+            this.state.mode = "loading";
+            this.postState();
+        }
         let detail;
         try {
             detail = await this.client.project(id, HISTORY);
         }
         catch (err) {
-            if (gen === this.generation)
-                this.fail(err);
+            if (gen !== this.generation)
+                return;
+            if (this.state.project?.id === id) {
+                // It stays on screen, and the 10-second read keeps trying: when NEO answers again the
+                // project is reloaded from there (see resync), with no Retry needed.
+                this.state.mode = "project";
+                this.orphaned = true;
+                this.resyncTimer ??= setInterval(() => void this.resync(), RESYNC_MS);
+            }
+            this.fail(err, reload ? "refresh" : "loadProject");
             return;
         }
         if (gen !== this.generation)
@@ -564,7 +727,8 @@ class ChatViewProvider {
                 this.plan.notePhase(ev.phase, ev.seq);
         }
         this.applyDetail(detail);
-        const events = detail.history.filter((e) => !IGNORED_KINDS.has(e.kind));
+        this.gateVisits = new sessionHistory_1.GateVisits();
+        const events = detail.history.filter((e) => !IGNORED_KINDS.has(e.kind) && !this.gateVisits.repeat(e));
         this.transcript = events.slice(-TRANSCRIPT_CAP);
         this.lastSeq = maxSeq(detail.history, 0);
         // State first: the history is drawn against it (the kickoff needs this project's idea).
@@ -576,7 +740,7 @@ class ChatViewProvider {
                     return;
                 this.state.stream = "up";
                 this.state.streamRetryAt = undefined;
-                this.state.connection = "connected";
+                this.noteUp();
                 // Say so while the gap is being filled, so a reconnect is visibly finished rather than
                 // just silently no longer broken.
                 if (reconnect)
@@ -624,6 +788,7 @@ class ChatViewProvider {
         this.flushTimer = undefined;
         this.lastSeq = 0;
         this.transcript = [];
+        this.gateVisits = new sessionHistory_1.GateVisits();
         this.plan.stop();
         this.sessions.close();
         this.action.reset();
@@ -677,7 +842,8 @@ class ChatViewProvider {
             this.sessions.noteEvent(ev);
         }
         this.applyEvent(ev);
-        if (IGNORED_KINDS.has(ev.kind))
+        // A gate already announced for the visit still open moves the state above, but is not drawn again.
+        if (IGNORED_KINDS.has(ev.kind) || this.gateVisits.repeat(ev))
             return;
         this.transcript.push(ev);
         if (this.transcript.length > TRANSCRIPT_CAP)
@@ -794,22 +960,90 @@ class ChatViewProvider {
             if (gen !== this.generation || seq < this.resyncApplied)
                 return;
             this.resyncApplied = seq;
-            this.state.connection = "connected";
+            this.noteUp();
+            if (this.orphaned) {
+                // A reload failed while NEO was down, so this project has no stream: reload it now.
+                this.resyncing = false;
+                const next = ++this.generation;
+                this.stopProject();
+                await this.loadProject(project.id, next);
+                return;
+            }
             this.applyDetail(detail);
             this.postState();
         }
         catch (err) {
             if (gen !== this.generation)
                 return;
-            if (err instanceof neoClient_1.NeoUnreachable) {
-                this.state.connection = "unreachable";
-                this.state.connectionError = err.message;
-                this.postState();
-            }
+            if (err instanceof neoClient_1.NeoUnreachable)
+                this.noteDown(err);
         }
         finally {
             this.resyncing = false;
         }
+    }
+    /**
+     * A read of the open project failed to reach NEO. The project, transcript, draft and attached
+     * context all stay; the first failures say "Reconnecting…", and after OFFLINE_AFTER in a row (or
+     * an explicit Retry that failed) the sidebar says NEO is offline. The reads go on regardless.
+     */
+    noteDown(err, hard = false) {
+        this.failures += 1;
+        const shown = (0, errors_1.describeError)(err, "connect");
+        if (this.state.connection === "connected" || hard)
+            (0, errors_1.logError)(shown);
+        this.state.offline = problemOf(shown);
+        this.state.connection = hard || this.failures >= OFFLINE_AFTER ? "unreachable" : "reconnecting";
+        this.postState();
+    }
+    /** NEO answered. After a loss of connection, say it is back. */
+    noteUp() {
+        const was = this.state.connection;
+        this.failures = 0;
+        this.state.offline = undefined;
+        this.state.connection = "connected";
+        if (was === "reconnecting" || was === "unreachable") {
+            this.post({ type: "toast", level: "ok", text: "Reconnected to NEO" });
+        }
+    }
+    /** NEO could not be reached with no project open: the offline empty state, and a slow check. */
+    wentOffline(err, shown = (0, errors_1.describeError)(err, "connect")) {
+        if (this.state.project && this.state.mode === "project") {
+            this.noteDown(err);
+            return;
+        }
+        (0, errors_1.logError)(shown);
+        this.state.connection = "unreachable";
+        this.state.offline = problemOf(shown);
+        this.state.problem = undefined;
+        this.postState();
+        this.pollOffline();
+    }
+    /** Checks for NEO every 10 seconds while it is offline and no project is open; connects once it answers. */
+    pollOffline() {
+        if (this.offlineTimer)
+            return;
+        const gen = this.generation;
+        this.offlineTimer = setInterval(async () => {
+            if (gen !== this.generation || this.state.connection !== "unreachable")
+                return this.stopOfflinePoll();
+            try {
+                await this.client.status();
+            }
+            catch {
+                return;
+            }
+            if (gen !== this.generation)
+                return;
+            this.stopOfflinePoll();
+            void this.connect();
+        }, RESYNC_MS);
+        this.offlineTimer.unref?.();
+    }
+    stopOfflinePoll() {
+        if (this.offlineTimer)
+            clearInterval(this.offlineTimer);
+        this.offlineTimer = undefined;
     }
     applyDetail(d) {
         const s = this.state;
@@ -857,9 +1091,22 @@ class ChatViewProvider {
                 this.postState();
                 if (this.state.project)
                     this.post({ type: "history", events: this.transcript });
+                if (this.draft)
+                    this.post({ type: "composer", text: this.draft }); // a reloaded webview's box is empty
+                return;
+            case "draft":
+                this.draft = typeof m.text === "string" ? m.text : "";
                 return;
             case "connect":
-                return this.connect();
+            case "retry":
+                return this.retry();
+            case "openSettings":
+                await (0, errors_1.openSettings)();
+                return;
+            case "pickFolder":
+                // VS Code's own folder dialog, the same on every platform; the window reopens on the folder.
+                await vscode.commands.executeCommand("vscode.openFolder");
+                return;
             case "refresh":
                 return this.refresh();
             case "createProject":
@@ -897,6 +1144,16 @@ class ChatViewProvider {
         typed = (typed ?? "").trim();
         if (!project || !typed)
             return;
+        if (!this.isReady()) {
+            // Not sent, so nothing can arrive twice: the text goes back in the box, the chips stay.
+            this.post({
+                type: "sendFailed",
+                text: typed,
+                message: "Not sent: the connection to NEO is not confirmed.",
+                hint: "Your text and attached files are kept. Send again once the sidebar says Connected.",
+            });
+            return;
+        }
         const sending = [...this.attachments];
         try {
             // Read now, so NEO gets the files as they are at the moment of sending. A failure here
@@ -934,7 +1191,9 @@ class ChatViewProvider {
             this.postState();
         }
         catch (err) {
-            this.post({ type: "sendFailed", text: typed, message: errorText(err) });
+            // Never resent from here: the text goes back in the box and the user decides.
+            const shown = this.actionFailed(err, "send");
+            this.post({ type: "sendFailed", text: typed, ...shown });
         }
     }
     /**
@@ -947,12 +1206,16 @@ class ChatViewProvider {
      */
     async startSession(typed) {
         const project = this.state.project;
-        const done = (outcome, message) => {
-            this.post({ type: "sessionStart", outcome, message });
+        const done = (outcome, problem) => {
+            this.post({ type: "sessionStart", outcome, ...(problem ? { message: problem.summary, hint: problem.hint, detail: problem.detail } : {}) });
             return outcome === "started";
         };
-        if (!project || this.state.connection !== "connected") {
+        if (!project) {
             void vscode.window.showInformationMessage("NEO: open a NEO project first.");
+            return done("cancelled");
+        }
+        if (!this.isReady()) {
+            void this.explainOffline("Starting a new session");
             return done("cancelled");
         }
         let kinds;
@@ -966,7 +1229,7 @@ class ChatViewProvider {
             kinds = (await this.client.sessions(project.id)).kinds;
         }
         catch (err) {
-            return done("failed", errorText(err));
+            return done("failed", this.actionFailed(err, "startSession", false));
         }
         let request = (typed ?? "").trim();
         if (!request) {
@@ -1006,11 +1269,14 @@ class ChatViewProvider {
             text = await (0, context_1.composeMessage)(request, sending);
         }
         catch (err) {
-            return done("failed", errorText(err));
+            return done("failed", { summary: "Could not start a new session.", hint: errorText(err) });
         }
         if (text.length > SESSION_REQUEST_MAX) {
-            return done("failed", `A new session's request can be at most ${SESSION_REQUEST_MAX.toLocaleString()} characters ` +
-                `(this one is ${text.length.toLocaleString()} with its attachments). Remove an attachment or shorten it.`);
+            return done("failed", {
+                summary: "Could not start a new session.",
+                hint: `A new session's request can be at most ${SESSION_REQUEST_MAX.toLocaleString()} characters ` +
+                    `(this one is ${text.length.toLocaleString()} with its attachments). Remove an attachment or shorten it.`,
+            });
         }
         if (project !== this.state.project)
             return done("cancelled"); // switched away meanwhile
@@ -1018,7 +1284,8 @@ class ChatViewProvider {
             await this.client.startSession(project.id, { kind, request: text });
         }
         catch (err) {
-            return done("failed", errorText(err));
+            // Not retried: a session that did start must not be started twice. The re-read shows which.
+            return done("failed", this.actionFailed(err, "startSession"));
         }
         this.attachments = this.attachments.filter((a) => !sending.includes(a));
         done("started");
@@ -1033,6 +1300,10 @@ class ChatViewProvider {
         const project = this.state.project;
         if (!project)
             return;
+        if (!this.isReady()) {
+            this.post({ type: "answerFailed", message: "Not sent: the connection to NEO is not confirmed.", hint: "Answer again once the sidebar says Connected." });
+            return;
+        }
         this.notice = null;
         this.state.stoppedAt = undefined;
         this.clearAttention();
@@ -1050,12 +1321,14 @@ class ChatViewProvider {
             }
         }
         catch (err) {
-            this.post({ type: "answerFailed", message: errorText(err) });
+            this.post({ type: "answerFailed", ...this.actionFailed(err, "answer") });
         }
     }
     async approve(reason) {
         const project = this.state.project;
         if (!project)
+            return;
+        if (!this.gateReady())
             return;
         const overrule = reason && reason.trim() ? { reason: reason.trim() } : undefined;
         try {
@@ -1063,7 +1336,7 @@ class ChatViewProvider {
             this.gateClosed(r.phase);
         }
         catch (err) {
-            this.gateRefused(err);
+            this.gateRefused(err, "approve");
         }
     }
     async reject(feedback) {
@@ -1071,13 +1344,21 @@ class ChatViewProvider {
         feedback = (feedback ?? "").trim();
         if (!project || !feedback)
             return;
+        if (!this.gateReady())
+            return;
         try {
             const r = await this.client.reject(project.id, feedback);
             this.gateClosed(r.phase);
         }
         catch (err) {
-            this.gateRefused(err);
+            this.gateRefused(err, "reject");
         }
+    }
+    gateReady() {
+        if (this.isReady())
+            return true;
+        this.post({ type: "gateFailed", message: "Not sent: the connection to NEO is not confirmed.", hint: "Decide the gate again once the sidebar says Connected." });
+        return false;
     }
     /**
      * The user acted (wrote, answered, decided a gate): NEO clears its stall at once, and the copy here
@@ -1103,8 +1384,8 @@ class ChatViewProvider {
      * A refused approval. A 409 carrying `failed` means the checks did not pass: they are shown,
      * and nothing is retried. "Approve anyway" exists only as a separate, explicit act with a reason.
      */
-    gateRefused(err) {
-        if (err instanceof neoClient_1.NeoHttpError && err.detail && typeof err.detail === "object") {
+    gateRefused(err, action) {
+        if (err instanceof neoClient_1.NeoHttpError && err.detail && typeof err.detail === "object" && !Array.isArray(err.detail)) {
             const d = err.detail;
             this.post({
                 type: "gateRefused",
@@ -1112,12 +1393,19 @@ class ChatViewProvider {
                 failed: Array.isArray(d.failed) ? d.failed : [],
                 confirmable: Boolean(d.confirmable),
                 artifactMissing: Boolean(d.artifact_missing),
+                detail: err.technical(),
             });
+            void this.resync();
+        }
+        else if (err instanceof neoClient_1.NeoHttpError && err.status < 500) {
+            // NEO's own refusal, in its words (e.g. the project is no longer at this gate).
+            this.post({ type: "gateRefused", message: err.message, failed: [], confirmable: false, detail: err.technical() });
+            void this.resync();
         }
         else {
-            this.post({ type: "gateRefused", message: errorText(err), failed: [], confirmable: false });
+            // Not a refusal: NEO could not be reached or failed. Nothing is retried; the card stays usable.
+            this.post({ type: "gateFailed", ...this.actionFailed(err, action) });
         }
-        void this.resync();
     }
     /**
      * Stop: NEO's own abort, nothing added to it.
@@ -1129,6 +1417,8 @@ class ChatViewProvider {
     async abort() {
         const project = this.state.project;
         if (!project || this.state.stopping)
+            return;
+        if (!this.confirmReady())
             return;
         this.state.stopping = true;
         this.stopRequestedAt = Date.now();
@@ -1143,7 +1433,7 @@ class ChatViewProvider {
             this.state.stopping = false;
             this.stopRequestedAt = 0;
             this.postState();
-            this.post({ type: "toast", level: "error", text: `Could not stop: ${errorText(err)}` });
+            this.postProblem(this.actionFailed(err, "abort"));
         }
     }
     /**
@@ -1178,9 +1468,9 @@ class ChatViewProvider {
         const folder = this.state.folder;
         name = (name ?? "").trim();
         idea = (idea ?? "").trim();
-        const fail = (message) => this.post({ type: "newProjectFailed", message });
+        const fail = (message, problem) => this.post({ type: "newProjectFailed", message, hint: problem?.hint, detail: problem?.detail });
         if (this.state.connection !== "connected") {
-            return fail(`NEO not reachable at ${this.state.serverHost}. Start NEO, press Retry, then create the project.`);
+            return fail(`NEO is offline (${this.client.baseUrl}). Start the NEO server, press Retry, then create the project.`);
         }
         if (!folder)
             return fail("Open a folder first: the project is created in the open folder.");
@@ -1218,7 +1508,9 @@ class ChatViewProvider {
             });
         }
         catch (err) {
-            return fail(errorText(err));
+            // Not retried: a project that was created must not be created twice. Projects shows which.
+            const problem = this.actionFailed(err, "createProject", false);
+            return fail(problem.summary, problem);
         }
         if (!(0, workspace_1.samePath)(created.path, folder)) {
             this.post({
@@ -1234,30 +1526,69 @@ class ChatViewProvider {
             await this.client.start(created.id, idea);
         }
         catch (err) {
-            this.post({ type: "toast", level: "error", text: `Created, but could not start: ${errorText(err)}` });
+            // The project exists either way; the message box starts it (send() on a setup project).
+            const problem = this.actionFailed(err, "startProject", false);
+            if (!(err instanceof neoClient_1.NeoUnreachable && err.maybeDelivered))
+                problem.hint = "Send your request in the message box to start it.";
+            this.postProblem(problem);
         }
         this.post({ type: "projectCreated" });
+        this.switchComposer(created.id);
         const gen = ++this.generation;
         this.stopProject();
         await this.loadProject(created.id, gen);
     }
     // --- helpers ----------------------------------------------------------------------------
-    fail(err) {
-        if (err instanceof neoClient_1.NeoUnreachable) {
-            this.state.connection = "unreachable";
-            this.state.connectionError = err.message;
-        }
-        else {
-            this.post({ type: "toast", level: "error", text: errorText(err) });
-        }
+    /**
+     * A failed read. Unreachable: the offline state (or "Reconnecting…" with a project open). Anything
+     * else: with a project on screen, a toast with its details; with nothing on screen, the empty state
+     * says what failed, with Retry.
+     */
+    fail(err, action) {
         if (this.state.mode === "loading")
             this.state.mode = this.state.project ? "project" : "noProject";
+        const shown = (0, errors_1.describeError)(err, action);
+        if (shown.offline) {
+            this.wentOffline(err, shown);
+            return;
+        }
+        (0, errors_1.logError)(shown);
+        if (this.state.mode === "project")
+            this.postProblem(problemOf(shown));
+        else
+            this.state.problem = problemOf(shown);
         this.postState();
+    }
+    /**
+     * A user action NEO did not confirm. What it means goes back to the caller to show; NEO being
+     * unreachable is noted as a lost connection; otherwise the state is re-read once (a read, so safe)
+     * in case the action landed or the state moved. The action itself is never repeated.
+     */
+    actionFailed(err, action, reread = true) {
+        const shown = (0, errors_1.describeError)(err, action);
+        (0, errors_1.logError)(shown);
+        if (shown.offline) {
+            if (this.state.project && this.state.mode === "project")
+                this.noteDown(err);
+            else
+                this.wentOffline(err, shown);
+        }
+        else if (reread) {
+            void this.resync();
+        }
+        return { ...problemOf(shown), message: shown.summary };
+    }
+    /** An error toast: the summary, what to do, and the details one click away. */
+    postProblem(p) {
+        this.post({ type: "toast", level: "error", text: p.summary, hint: p.hint, detail: p.detail, settings: p.config });
     }
     blankState(connection) {
         return {
             serverHost: (0, neoClient_1.hostOf)(this.client.baseUrl),
+            serverUrl: this.client.baseUrl,
             connection,
+            retrying: false,
+            ready: false,
             stream: "off",
             mode: "loading",
             stages: [],
@@ -1277,17 +1608,26 @@ class ChatViewProvider {
         };
     }
     postState() {
+        this.state.ready = this.isReady();
         this.state.attachments = this.attachments.map(context_1.viewOf);
         this.state.suggestion = this.state.mode === "project" ? this.suggestion() : null;
         this.settleStopping();
-        // NEO's count - or, once Execute is over and NEO's has dropped, the furthest one remembered.
-        const plan = this.plan.view(this.state.planProgress, this.state.phase, this.lastSeq);
+        const session = this.state.mode === "project" ? this.sessions.activeSession() : null;
+        // NEO's count - or, once Execute is over and NEO's has dropped, the furthest one remembered for
+        // this session. A session whose rail has no plan step (a quick change) has no task progress of
+        // its own: whatever NEO counts then is an earlier build's plan, not this work's.
+        const stages = this.state.stages;
+        const ownPlan = !stages.length || (0, plan_1.documentGates)(stages).length > 0;
+        const plan = ownPlan
+            ? this.plan.view(this.state.planProgress, this.state.phase, this.lastSeq, session?.id)
+            : { progress: null, task: null };
+        this.state.rail = (0, plan_1.railStages)(this.state.stages, this.state.atGate, this.state.gate?.phase);
         // Before the state goes out: unseen activity on screen now is summarised, then marked seen.
         if (this.state.mode === "project")
             this.sessions.sync(this.lastSeq, this.state, plan.progress);
         this.state.sessions = this.state.mode === "project" ? this.sessions.view() : undefined;
         this.state.live = (0, progress_1.buildLive)({ ...this.state, planProgress: plan.progress }, plan.task, this.action.current(), (0, progress_1.liveNotice)(this.notice, this.state.busy));
-        this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase);
+        this.changes.update(this.state.mode === "project" ? this.state.project : undefined, this.state.phase, session ? { id: session.id, since: session.createdAt } : undefined);
         this.state.artifacts = this.artifacts.build({ ...this.state, stages: this.state.stages });
         this.post({ type: "state", state: this.state });
         this.syncContextKeys();
@@ -1453,12 +1793,16 @@ const BRAND_MARK = `<svg class="brand-mark" viewBox="0 0 24 24" width="16" heigh
           <path d="M12 2.2 20.5 7.1v9.8L12 21.8 3.5 16.9V7.1Z" stroke-width="1.8"/>
           <path d="M8.6 15.6V8.4l6.8 7.2V8.4" stroke-width="2.1"/>
         </svg>`;
+/** `neo.serverUrl` as configured, or NEO's default address when it is not set. Exported for tests. */
 function serverUrl() {
-    const raw = vscode.workspace.getConfiguration("neo").get("serverUrl") || "http://127.0.0.1:8720";
+    const raw = vscode.workspace.getConfiguration("neo").get("serverUrl") || neoClient_1.DEFAULT_SERVER_URL;
     return raw.replace(/\/+$/, "");
 }
 function maxSeq(events, floor) {
     return events.reduce((m, e) => (typeof e.seq === "number" && e.seq > m ? e.seq : m), floor);
+}
+function problemOf(e) {
+    return { summary: e.summary, hint: e.hint, detail: e.detail, config: e.config || undefined };
 }
 function errorText(err) {
     return err instanceof Error ? err.message : String(err);

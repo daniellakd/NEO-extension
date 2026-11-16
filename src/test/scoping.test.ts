@@ -150,6 +150,37 @@ describe("Live Progress is scoped to the session that produced it", () => {
     assert.equal(t.state()!.live!.progress, null);
     assert.equal(t.state()!.live!.task, null);
   });
+
+  it("a new Full Pipeline session shows none of the last build's plan until its own Execute counts", async () => {
+    const t = await setup({ phase: "done", stages: FULL, planProgress: { done: 2, total: 2 } });
+    const plans = path.join(t.a, "docs", "neoag");
+    fs.mkdirSync(plans, { recursive: true });
+    fs.writeFileSync(path.join(plans, "plan.md"), PLAN);
+    await until(() => Boolean(t.state()?.live?.task?.complete), "the finished plan");
+
+    // Build 2 starts at the interview. Its rail has a plan step, but no plan of its own yet: NEO's
+    // count (2 of 2) is still Build 1's plan.md, ticked to the end.
+    const p = t.neo.projects.get("p1")!;
+    t.neo.startSession("p1", { id: "p1-s2", kind: "full", title: "Health", request: "add /health" });
+    const fresh = FULL.map((s) => ({ ...s, state: s.phase === "brainstorm" ? "active" : "pending" }));
+    Object.assign(p, { phase: "brainstorm", stages: fresh });
+    t.neo.emit("p1", { kind: "phase", phase: "brainstorm" });
+    await until(() => t.state()?.sessions?.active?.id === "p1-s2" && t.state()?.phase === "brainstorm", "Build 2 at the interview");
+    for (const phase of ["brainstorm", "design-gate", "plan", "plan-gate"]) {
+      Object.assign(p, { phase });
+      await t.provider.refresh();
+      await until(() => t.state()?.phase === phase, phase);
+      assert.equal(t.state()!.live!.progress, null, `${phase}: no inherited progress`);
+      assert.equal(t.state()!.live!.task, null, `${phase}: no inherited current task`);
+    }
+
+    // Its own plan is made and Execute ticks it: Live Progress shows Build 2's count and task.
+    fs.writeFileSync(path.join(plans, "plan.md"), "# Plan\n\n### Task 1: Route\n- [x] add /health\n### Task 2: Docs\n- [ ] document it\n");
+    Object.assign(p, { phase: "execute", plan_progress: { done: 1, total: 2 } });
+    t.neo.emit("p1", { kind: "phase", phase: "execute" });
+    await until(() => t.state()?.phase === "execute" && t.state()?.live?.task?.index === 2, "Build 2's own progress");
+    assert.deepEqual(t.state()!.live!.progress, { done: 1, total: 2 });
+  });
 });
 
 // --- the rail at the review gate --------------------------------------------------------------

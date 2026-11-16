@@ -43,6 +43,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PlanArtifacts = void 0;
 exports.documentGates = documentGates;
+exports.railStages = railStages;
 exports.outlineDocument = outlineDocument;
 exports.outlinePlan = outlinePlan;
 exports.statusOf = statusOf;
@@ -64,6 +65,22 @@ function documentGates(stages) {
     const gates = stages.filter((s) => s.kind === "gate" && s.artifact);
     const plan = gates.findIndex(isPlanGate);
     return plan < 0 ? [] : gates.slice(0, plan + 1);
+}
+/**
+ * The rail as drawn. While a gate waits for the user's decision, the work it reviews is still the
+ * current step: NEO names some gates after what approval leads to (the review gate is "Merge"), so
+ * highlighting the gate chip would announce the next phase before it has begun. The gate is marked
+ * "waiting" instead, and the stage before it stays current; NEO's next read moves both on once the
+ * decision has actually advanced the pipeline. Nothing else on the rail changes.
+ */
+function railStages(stages, atGate, gatePhase) {
+    if (!atGate)
+        return stages;
+    const i = stages.findIndex((s) => s.kind === "gate" && s.state === "active" && (!gatePhase || s.phase === gatePhase));
+    if (i < 0)
+        return stages;
+    const reviewed = i > 0 && stages[i - 1].kind !== "gate" ? i - 1 : -1;
+    return stages.map((s, j) => (j === i ? { ...s, state: "waiting" } : j === reviewed ? { ...s, state: "active" } : s));
 }
 // --- reading a document -------------------------------------------------------------------------
 const H1 = /^#[ \t]+(.+?)[ \t#]*$/;

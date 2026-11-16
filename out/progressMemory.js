@@ -49,15 +49,18 @@ function planKey(outline, titles) {
  * from disk, used only when they add up to NEO's count; `seq` the newest NEO event seen.
  */
 function reconcile(input) {
-    const { phase, plan, seq } = input;
+    const { phase, plan, seq, session } = input;
     const backend = input.backend && input.backend.total > 0 ? clamp(input.backend) : null;
     const stage = stageOf(phase);
     // A new plan is being made: whatever was counted belonged to the last one.
     if (stage === "before")
         return { progress: backend, record: undefined, restored: false };
-    // The record is only ever about the plan it was made for. Unknown plan: keep it, use nothing.
+    // The record is only ever about the plan, and the session, it was made for. Unknown plan: keep
+    // it, use nothing. Another session: it is gone - a new session never shows an old build's count.
     let record = input.record;
     if (record && plan && record.plan !== plan.key)
+        record = undefined;
+    if (record && session !== undefined && record.session !== session)
         record = undefined;
     const usable = Boolean(record && plan);
     // What NEO says, as a record - only when it is about the plan known here.
@@ -68,6 +71,7 @@ function reconcile(input) {
             total: backend.total,
             ticks: input.ticks && input.ticks.length === backend.total && ticked(input.ticks) === backend.done ? input.ticks : undefined,
             seq,
+            ...(session !== undefined ? { session } : {}),
         }
         : undefined;
     // Execute: the worktree is there and NEO's count is the truth, lower or not.
@@ -90,6 +94,7 @@ function keep(record, counted) {
         return record;
     const same = record &&
         record.plan === counted.plan &&
+        record.session === counted.session &&
         record.done === counted.done &&
         record.total === counted.total &&
         (counted.ticks === undefined || JSON.stringify(record.ticks) === JSON.stringify(counted.ticks));

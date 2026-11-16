@@ -17,6 +17,7 @@
  * No VS Code API in here, on purpose: it is unit-tested directly (src/test/sessions.test.ts).
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.GateVisits = void 0;
 exports.kindLabel = kindLabel;
 exports.phaseLabel = phaseLabel;
 exports.isHumanMessage = isHumanMessage;
@@ -27,6 +28,7 @@ exports.anchorKey = anchorKey;
 exports.covers = covers;
 exports.minSeq = minSeq;
 exports.maxGateAt = maxGateAt;
+exports.dedupeGates = dedupeGates;
 exports.awaySummary = awaySummary;
 exports.describeNow = describeNow;
 exports.formatTime = formatTime;
@@ -125,6 +127,38 @@ function minSeq(events) {
 function maxGateAt(gates) {
     return (gates ?? []).reduce((m, g) => (typeof g.created_at === "number" && g.created_at > m ? g.created_at : m), 0);
 }
+/**
+ * Tells a repeated announcement of one gate visit from a new visit. NEO can announce a gate that is
+ * already open again (its `gate` event re-sent for the same phase), which would otherwise be drawn
+ * as the gate being reached twice. A visit ends only when NEO moves to another phase - approval
+ * moving on, or Request Changes sending the work back - so a later `gate` for the same phase after
+ * that is a real re-review and is kept. Feed every event in order.
+ */
+class GateVisits {
+    open = null;
+    /** True when `ev` is a gate already announced for the visit still open. */
+    repeat(ev) {
+        if (ev.kind === "phase") {
+            const p = String(ev.phase ?? "");
+            if (p && p !== this.open)
+                this.open = null;
+            return false;
+        }
+        if (ev.kind !== "gate")
+            return false;
+        const phase = String(ev.phase ?? "");
+        if (this.open === phase)
+            return true;
+        this.open = phase;
+        return false;
+    }
+}
+exports.GateVisits = GateVisits;
+/** The events with each gate visit announced once (see GateVisits). Order is kept. */
+function dedupeGates(events) {
+    const visits = new GateVisits();
+    return events.filter((e) => !visits.repeat(e));
+}
 // Kinds the transcript draws (chat.js render), for placing the "new" divider.
 const DRAWN = new Set(["user", "text", "tool", "question", "notice", "phase", "gate", "error"]);
 /**
@@ -196,7 +230,7 @@ function awaySummary(input) {
     for (const e of input.events)
         if (typeof e.seq === "number" && e.seq > anchor.seq)
             bySeq.set(e.seq, e);
-    const fresh = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+    const fresh = dedupeGates([...bySeq.values()].sort((a, b) => a.seq - b.seq));
     const partial = !input.complete;
     const n = (count, one, many = `${one}s`) => `${partial ? "at least " : ""}${count} ${count === 1 ? one : many}`;
     const path = [];
@@ -454,7 +488,7 @@ function sessionMarkdown(input) {
 function historyBlocks(events, stages) {
     const merged = new Map();
     const order = [];
-    const sorted = [...events].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
+    const sorted = dedupeGates([...events].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0)));
     for (const ev of sorted) {
         let key;
         if ((ev.kind === "text" || ev.kind === "tool" || ev.kind === "error") && ev.part !== undefined && ev.part !== null) {

@@ -28,7 +28,7 @@ import {
   planTitles,
   worktreeDir,
 } from "./planOutline";
-import { ProgressRecord, planKey, reconcile, staleAfter } from "./progressMemory";
+import { ProgressRecord, planKey, reconcile, staleAfter, stageOf } from "./progressMemory";
 
 export type { CurrentTask } from "./planOutline";
 
@@ -745,12 +745,19 @@ export function buildLive(
     : null;
 
   // A plan is worth showing once there is one to be part-way through. Before Execute the plan
-  // gate card itself is on screen, so an untouched "0 of 8" there would only repeat it.
+  // gate card itself is on screen, so an untouched "0 of 8" there would only repeat it. While a
+  // plan is being made (setup through the plan gate) nothing of it can be ticked yet: NEO counts
+  // the plan file on disk for the whole project, so any ticks then are an earlier session's
+  // finished plan, not this work's. A phase this client does not know shows a count under way.
   const plan = s.planProgress;
   const showPlan =
     inProject &&
     connected &&
-    Boolean(plan && plan.total > 0 && (/^(execute|review|finish|merge|done)/.test(phase) || plan.done > 0));
+    Boolean(
+      plan &&
+        plan.total > 0 &&
+        (/^(execute|review|finish|merge|done)/.test(phase) || (plan.done > 0 && stageOf(phase) !== "before")),
+    );
   // Once Execute is over no task is being worked on: a finished plan reads "All N tasks done", and
   // an unfinished one shows only its count - never an old task presented as the current one.
   const afterExecute = /^(review|finish|merge|done)/.test(phase);
